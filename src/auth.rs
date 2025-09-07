@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::model_manager::ModelManager;
 use crate::models::{ErrorResponse, ErrorDetail};
 use axum::{
     body::Body,
@@ -8,13 +8,13 @@ use axum::{
     Json,
     middleware::Next,
 };
-use tracing::{warn, info};
+use tracing::{info, debug};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub config: Arc<RwLock<Config>>,
+    pub model_manager: Arc<RwLock<ModelManager>>,
     pub token: Option<String>,
 }
 
@@ -34,41 +34,17 @@ pub async fn require_authorization(
     }
 
     // Extract token from Authorization header
-    let auth_header = request.headers().get("Authorization");
-    let provided_token = match auth_header {
-        Some(header_value) => {
-            let header_str = match header_value.to_str() {
-                Ok(s) => s,
-                Err(_) => {
-                    warn!("Invalid Authorization header format");
-                    let error_response = ErrorResponse {
-                        error: ErrorDetail {
-                            message: "Invalid Authorization header format".to_string(),
-                            r#type: "invalid_request_error".to_string(),
-                            code: Some("invalid_auth_header".to_string()),
-                        },
-                    };
-                    return Err((StatusCode::UNAUTHORIZED, Json(error_response)).into_response());
-                }
-            };
-            
-            // Check if header starts with "Bearer "
-            if let Some(bearer_token) = header_str.strip_prefix("Bearer ") {
-                Some(bearer_token)
-            } else {
-                warn!("Authorization header does not use Bearer format");
-                let error_response = ErrorResponse {
-                    error: ErrorDetail {
-                        message: "Authorization header must use Bearer format".to_string(),
-                        r#type: "invalid_request_error".to_string(),
-                        code: Some("invalid_auth_format".to_string()),
-                    },
-                };
-                return Err((StatusCode::UNAUTHORIZED, Json(error_response)).into_response());
-            }
+    let token = request.headers()
+        .get("Authorization")
+        .and_then(|hv| hv.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.trim()))
+        .or_else(|| request.headers().get("x-api-key").and_then(|hv| hv.to_str().ok()));
+    let provided_token = match token {
+        Some(header_str) => {
+            Some(header_str)
         }
         None => {
-            warn!("Missing Authorization header");
+            info!("Missing Authorization header");
             let error_response = ErrorResponse {
                 error: ErrorDetail {
                     message: "Authorization header is required".to_string(),
@@ -82,7 +58,7 @@ pub async fn require_authorization(
     
     // Validate token
     if provided_token != Some(app_state.token.as_ref().unwrap().as_str()) {
-        warn!("Invalid token provided");
+        info!("Invalid token provided");
         let error_response = ErrorResponse {
             error: ErrorDetail {
                 message: "Invalid authentication token".to_string(),
@@ -93,6 +69,6 @@ pub async fn require_authorization(
         return Err((StatusCode::UNAUTHORIZED, Json(error_response)).into_response());
     }
     
-    info!("Token validation successful");
+    debug!("Token validation successful");
     Ok(next.run(request).await)
 }

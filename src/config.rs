@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -15,6 +14,7 @@ pub struct ModelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMParams {
+    pub api_type: String,
     pub model: String,
     pub api_base: String,
     pub api_key: String,
@@ -22,35 +22,96 @@ pub struct LLMParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterSettings {
-    #[serde(deserialize_with = "deserialize_model_alias")]
-    pub model_group_alias: HashMap<String, Vec<String>>,
+    pub strategy: RoutingStrategy,
+    pub model_groups: Vec<ModelGroup>,
 }
 
-fn deserialize_model_alias<'de, D>(deserializer: D) -> Result<HashMap<String, Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    let map: HashMap<String, Vec<String>> = serde_json::from_str(&s).map_err(serde::de::Error::custom)?;
-    Ok(map)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingStrategy {
+    RoundRobin,
+    LeastConn,
+    Random,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelGroup {
+    pub name: String,
+    
+    pub models: Vec<ModelGroupEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelGroupEntry {
+    pub name: String,
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+}
+
+fn default_weight() -> u32 {
+    100
 }
 
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = serde_yaml::from_str(&content)?;
+        
+        Self::validate_model_names(&config)?;
+        
+        Self::validate_model_group_names(&config)?;
+        
+        Self::validate_model_group_model_names(&config)?;
+        
         Ok(config)
     }
-
-    pub fn get_model_config(&self, model: &str) -> Option<&ModelConfig> {
-        // First check if the model is in model_group_alias
-        if let Some(aliases) = self.router_settings.model_group_alias.get(model) {
-            if let Some(first_alias) = aliases.first() {
-                return self.model_list.iter().find(|m| m.model_name == *first_alias);
+    
+    fn validate_model_names(config: &Config) -> anyhow::Result<()> {
+        let mut seen_names = std::collections::HashSet::new();
+        
+        for model in &config.model_list {
+            if seen_names.contains(&model.model_name) {
+                return Err(anyhow::anyhow!(
+                    "Duplicate model_name found: '{}'. Model names must be unique.",
+                    model.model_name
+                ));
+            }
+            seen_names.insert(model.model_name.clone());
+        }
+        
+        Ok(())
+    }
+    
+    fn validate_model_group_names(config: &Config) -> anyhow::Result<()> {
+        let mut model_group_names = std::collections::HashSet::new();
+        
+        for model_group in &config.router_settings.model_groups {
+            if model_group_names.contains(&model_group.name) {
+                return Err(anyhow::anyhow!(
+                    "Duplicate model_group names '{}' found in model_group", &model_group.name
+                ));
+            }
+            model_group_names.insert(model_group.name.clone());
+        }
+        
+        Ok(())
+    }
+    
+    fn validate_model_group_model_names(config: &Config) -> anyhow::Result<()> {
+        for model_group in &config.router_settings.model_groups {
+            let mut seen_names = std::collections::HashSet::new();
+            
+            for entry in &model_group.models {
+                if seen_names.contains(&entry.name) {
+                    return Err(anyhow::anyhow!(
+                        "Duplicate model name '{}' found in model_group '{}'. Model names in a group must be unique.",
+                        entry.name, &model_group.name
+                    ));
+                }
+                seen_names.insert(entry.name.clone());
             }
         }
         
-        // If not found in alias, check direct model name
-        self.model_list.iter().find(|m| m.model_name == model)
+        Ok(())
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "llm-router"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -19,3 +19,7 @@ bytes = "1.0"
 notify = "6.1"
 axum-macros = "0.5.0"
 clap = { version = "4.5", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4"] }
+regex = "1.11.2"
+rand = "0.8"
+tempfile = "3.10.0"

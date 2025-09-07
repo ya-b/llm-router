@@ -1,6 +1,8 @@
 mod auth;
 mod config;
+mod converter;
 mod models;
+mod model_manager;
 mod router;
 
 use axum::{
@@ -9,10 +11,10 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use config::Config;
-use router::{chat_completion, health_check};
+use router::{chat_completion, list_models};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber;
 use notify::{RecursiveMode, Watcher, EventKind};
 use std::path::Path;
@@ -39,7 +41,10 @@ struct Args {
     log_level: String,
 }
 
-async fn watch_config_file(config_path: &str, config: Arc<RwLock<Config>>) -> anyhow::Result<()> {
+async fn watch_config_file(
+    config_path: &str,
+    model_manager: &Arc<tokio::sync::RwLock<model_manager::ModelManager>>
+) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel(100);
 
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -57,12 +62,13 @@ async fn watch_config_file(config_path: &str, config: Arc<RwLock<Config>>) -> an
             info!("Config file modified, attempting to reload");
             match Config::from_file(config_path) {
                 Ok(new_config) => {
-                    let mut config_write = config.write().await;
-                    *config_write = new_config;
+                    // Update model manager with new config and reset counters
+                    let mut model_manager_write = model_manager.write().await;
+                    model_manager_write.update_config(Arc::new(new_config));
                     info!("Configuration reloaded successfully");
                 }
                 Err(e) => {
-                    warn!("Failed to reload configuration: {}", e);
+                    error!("Failed to reload configuration: {}", e);
                 }
             }
         }
@@ -98,32 +104,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config_path = args.config.clone();
-    let config = Config::from_file(&config_path)?;
+    // Create model manager with RwLock for dynamic updates
+    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?))));
     info!("Configuration loaded successfully from: {}", config_path);
 
-    // Create shared state with RwLock for dynamic updates
-    let config_state = Arc::new(RwLock::new(config));
-
-    // Clone the config state for the config watcher
-    let config_watcher_state = config_state.clone();
-
     // Start config file watcher in a separate task
+    let config_path_for_watcher = config_path.clone();
+    let model_manager_for_watcher = model_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = watch_config_file(&config_path, config_watcher_state).await {
+        if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
             warn!("Config file watcher error: {}", e);
         }
     });
 
-    // Create app state with config and token
+    // Create app state with model manager and token
     let app_state = auth::AppState {
-        config: config_state,
+        model_manager: model_manager.clone(),
         token: args.token,
     };
 
     // Create router
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completion))
-        .route("/health", get(health_check))
+        .route("/v1/messages", post(chat_completion))
+        .route("/v1/models", get(list_models))
+        .route("/health", get(|| async { "OK" }))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             auth::require_authorization,
