@@ -1,0 +1,10 @@
+model_list:
+  - model_name: your_model_name
+    llm_params:
+      model: model
+      api_base: https://llm.api:8000/v1
+      api_key: sk-1234
+
+router_settings:
+  model_group_alias: '{"model_name_alias": ["your_model_name"]}'
+

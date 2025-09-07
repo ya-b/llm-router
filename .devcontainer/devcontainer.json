@@ -1,0 +1,17 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "mounts": [
+        {
+            "source": "${localWorkspaceFolder}/.devcontainer/.cache",
+            "target": "/root/.cache",
+            "type": "bind"
+        },
+        {
+            "source": "${localWorkspaceFolder}/.devcontainer/.cargo_cache",
+            "target": "/usr/local/cargo/registry/cache",
+            "type": "bind"
+        }
+    ]
+}
