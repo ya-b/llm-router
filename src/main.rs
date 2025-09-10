@@ -28,17 +28,23 @@ struct Args {
     #[arg(short, long, default_value = "0.0.0.0")]
     ip: String,
 
-    #[arg(short, long, default_value = "4000")]
+    #[arg(short, long, default_value = "8000")]
     port: u16,
 
+    /// Path to config file
     #[arg(short, long, default_value = "config.yaml")]
     config: String,
 
     #[arg(short, long)]
     token: Option<String>,
 
+    /// trace, debug, info, warn, error
     #[arg(short, long, default_value = "warn")]
     log_level: String,
+
+    /// socks and http proxy, example: socks5://192.168.0.2:10080
+    #[arg(long)]
+    proxy: Option<String>,
 }
 
 async fn watch_config_file(
@@ -105,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config_path = args.config.clone();
     // Create model manager with RwLock for dynamic updates
-    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?))));
+    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?), args.proxy.clone())));
     info!("Configuration loaded successfully from: {}", config_path);
 
     // Start config file watcher in a separate task

@@ -7,6 +7,7 @@ use rand::Rng;
 
 pub struct ModelManager {
     config: Arc<Config>,
+    proxy: Option<String>,
     // Key: (group_name, model_name), Value: connection count for the model in the group
     connection_counts: HashMap<(String, String), AtomicUsize>,
     // Key: (group_name, model_name), Value: current weight for smooth weighted round robin
@@ -24,7 +25,7 @@ impl fmt::Debug for ModelManager {
 }
 
 impl ModelManager {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>, proxy: Option<String>) -> Self {
         let mut connection_counts = HashMap::new();
         let mut current_weights = HashMap::new();
         
@@ -40,6 +41,7 @@ impl ModelManager {
         
         Self {
             config,
+            proxy,
             connection_counts,
             current_weights,
         }
@@ -47,10 +49,14 @@ impl ModelManager {
     
     pub fn update_config(&mut self, new_config: Arc<Config>) {
         // Create a new instance with the new config and reuse its fields
-        let new_manager = Self::new(new_config.clone());
+        let new_manager = Self::new(new_config.clone(), self.get_proxy().clone());
         self.config = new_config;
         self.connection_counts = new_manager.connection_counts;
         self.current_weights = new_manager.current_weights;
+    }
+
+    pub fn get_proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
     
     pub fn get_model_config(&self, model: &str) -> Option<&ModelConfig> {

@@ -14,31 +14,32 @@
 程序支持以下命令行参数：
 
 ```bash
-Usage: llm-router.exe [OPTIONS]
+Usage: llm-router [OPTIONS]
 
 Options:
   -i, --ip <IP>                [default: 0.0.0.0]
-  -p, --port <PORT>            [default: 4000]
-  -c, --config <CONFIG>        [default: config.yaml]
-  -t, --token <TOKEN>
-  -l, --log-level <LOG_LEVEL>  [default: warn]
+  -p, --port <PORT>            [default: 8000]
+  -c, --config <CONFIG>        Path to config file [default: config.yaml]
+  -t, --token <TOKEN>          
+  -l, --log-level <LOG_LEVEL>  trace, debug, info, warn, error [default: warn]
+      --proxy <PROXY>          socks and http proxy, example: socks5://192.168.0.2:10080
   -h, --help                   Print help
 ```
 
 ### 使用示例
 
 ```bash
-llm-router --ip 0.0.0.0 --port 4000 --config config.yaml --token your-secret-token
+llm-router --ip 0.0.0.0 --port 8000 --config config.yaml --token your-secret-token
 ```
 
 
 ## API 使用
 
 ```bash
-curl -X GET http://localhost:4000/v1/models -H "Authorization: Bearer your-secret-token"
+curl -X GET http://localhost:8000/v1/models -H "Authorization: Bearer your-secret-token"
 
 
-curl -X POST http://localhost:4000/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-secret-token" \
   -d '{
@@ -49,7 +50,7 @@ curl -X POST http://localhost:4000/v1/chat/completions \
   }'
 
 
-curl http://localhost:4000/v1/messages \
+curl http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-token" \
   -d '{
@@ -79,7 +80,7 @@ model_list:
       model: qwen3-8b
       api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
-      overrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
+      rewrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
       
   - model_name: model2
     llm_params:
@@ -87,7 +88,7 @@ model_list:
       model: glm-4.5-flash
       api_base: https://open.bigmodel.cn/api/paas/v4
       api_key: sk-1234
-      overrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
+      rewrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
 
   - model_name: model3
     llm_params:
@@ -118,7 +119,7 @@ router_settings:
   - `model`: 提供商处的实际模型名称
   - `api_base`: API 基础 URL
   - `api_key`: API 密钥
-  - `overrite_body`: 可选，会覆盖请求体里的参数
+  - `rewrite_body`: 可选，会覆盖请求体里的参数
 
 `router_settings` 定义路由策略。请求的时候模型名称使用router_settings中定义的name
 

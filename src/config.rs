@@ -19,7 +19,7 @@ pub struct LLMParams {
     pub api_base: String,
     pub api_key: String,
     #[serde(default = "default_body")]
-    pub overrite_body: String,
+    pub rewrite_body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

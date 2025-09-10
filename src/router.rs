@@ -38,12 +38,24 @@ fn build_target_url(model_config: &ModelConfig) -> String {
     }
 }
 
-fn request(api_type: &String, request_json: &Value, model_config: &ModelConfig) -> impl Future<Output = Result<reqwest::Response, reqwest::Error>> {
+fn request(api_type: &String, request_json: &Value, model_config: &ModelConfig, proxy_url: &Option<String>) -> impl Future<Output = Result<reqwest::Response, reqwest::Error>> {
     // Forward request to the target API
-    let client = reqwest::Client::new();
+    let client_builder = reqwest::Client::builder();
+    
+    // Configure proxy if provided
+    let client_builder = if let Some(proxy) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy)
+            .expect("Failed to create proxy");
+        client_builder.proxy(proxy)
+    } else {
+        client_builder
+    };
+    
+    let client = client_builder.build().expect("Failed to build HTTP client");
     let target_url = build_target_url(model_config);
-    info!("Forwarding request to: {}", target_url);
-    debug!("raw request: {:?}", serde_json::to_string(&request_json));
+    if let Some(proxy) = proxy_url {
+        debug!("Using proxy: {}", proxy);
+    }
 
     let mut target_request = client
         .post(&target_url)
@@ -69,7 +81,8 @@ fn request(api_type: &String, request_json: &Value, model_config: &ModelConfig) 
         obj.insert("model".to_string(), json!(model_config.llm_params.model));
         debug!("Model mapping: {:?} -> {:?}", original_model, model_config.llm_params.model);
     }
-    debug!("request {:?}: {:?}", &target_url, serde_json::to_string(&target_body));
+    info!("Forwarding request to: {}", target_url);
+    debug!("request body: {}", serde_json::to_string(&target_body).expect("Failed to serialize request"));
     target_request.json(&target_body).send()
 }
 
@@ -90,15 +103,13 @@ pub async fn chat_completion(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
     
-    debug!("Received chat completion request for model: {}", model);
-    debug!("Request details: model={}, stream={}", model, stream);
+    debug!("raw request: {}", serde_json::to_string(&request_json).expect("Failed to serialize request"));
 
-    // Get model configuration using model manager
+    let model_manager = config.model_manager.read().await;
     let model_config = {
-        let model_manager = config.model_manager.read().await;
         match model_manager.get_model_config(model) {
             Some(config) => {
-                info!("Found model configuration for: {}", model);
+                debug!("Found model configuration for: {}", model);
                 Some(config.clone())
             }
             None => {
@@ -116,7 +127,7 @@ pub async fn chat_completion(
     }.unwrap(); // Safe to unwrap because we return on None
 
     let mut final_request_json = request_json.clone();
-    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.overrite_body) {
+    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_body) {
         Ok(serde_json::Value::Object(map)) => {
             for (k, v) in map {
                 if let Some(obj) = final_request_json.as_object_mut() {
@@ -124,12 +135,11 @@ pub async fn chat_completion(
                 }
             }
         },
-        Ok(_) => {warn!("'overrite_body' parsed error")},
-        Err(_) => {warn!("'overrite_body' parsed error")}
+        Ok(_) => {warn!("'rewrite_body' parsed error")},
+        Err(_) => {warn!("'rewrite_body' parsed error")}
     };
-
-    
-    let response = request(&api_type, &final_request_json, &model_config);
+    let proxy_url = model_manager.get_proxy();
+    let response = request(&api_type, &final_request_json, &model_config, &proxy_url);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {
@@ -201,7 +211,7 @@ async fn handle_non_streaming_response(
         response_json = ApiConverter::anthropic_to_openai_response(&response_json);
     }
 
-    debug!("Response received with model updated to: {}", model);
+    debug!("Response received with model updated to: {}\n{:?}", model, serde_json::to_string(&response_json));
     Json(response_json).into_response()
 }
 
@@ -280,7 +290,7 @@ async fn handle_streaming_response(
 pub async fn list_models(
     State(config): State<AppState>,
 ) -> impl IntoResponse {
-    info!("Received models list request");
+    debug!("Received models list request");
     
     let model_groups = {
         let model_manager = config.model_manager.read().await;
@@ -303,6 +313,6 @@ pub async fn list_models(
         data: models,
     };
     
-    info!("Returning {} models", response.data.len());
+    debug!("Returning {} models", response.data.len());
     Json(response).into_response()
 }

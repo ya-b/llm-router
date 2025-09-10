@@ -19,7 +19,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["-l", "debug"],
+            "args": ["-l", "debug", "-p", "4000"],
             "cwd": "${workspaceFolder}"
         },
         {

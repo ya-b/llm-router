@@ -5,7 +5,7 @@ model_list:
       model: qwen3-8b
       api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
-      overrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
+      rewrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
       
   - model_name: model2
     llm_params:
@@ -13,7 +13,7 @@ model_list:
       model: glm-4.5-flash
       api_base: https://open.bigmodel.cn/api/paas/v4
       api_key: sk-1234
-      overrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
+      rewrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
 
   - model_name: model3
     llm_params:
