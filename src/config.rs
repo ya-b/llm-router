@@ -18,6 +18,8 @@ pub struct LLMParams {
     pub model: String,
     pub api_base: String,
     pub api_key: String,
+    #[serde(default = "default_body")]
+    pub overrite_body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +52,10 @@ pub struct ModelGroupEntry {
 
 fn default_weight() -> u32 {
     100
+}
+
+fn default_body() -> String {
+    "{}".to_string()
 }
 
 impl Config {

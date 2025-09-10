@@ -114,7 +114,22 @@ pub async fn chat_completion(
             }
         }
     }.unwrap(); // Safe to unwrap because we return on None
-    let response = request(&api_type, &request_json, &model_config);
+
+    let mut final_request_json = request_json.clone();
+    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.overrite_body) {
+        Ok(serde_json::Value::Object(map)) => {
+            for (k, v) in map {
+                if let Some(obj) = final_request_json.as_object_mut() {
+                    obj.insert(k, v);
+                }
+            }
+        },
+        Ok(_) => {warn!("'overrite_body' parsed error")},
+        Err(_) => {warn!("'overrite_body' parsed error")}
+    };
+
+    
+    let response = request(&api_type, &final_request_json, &model_config);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {

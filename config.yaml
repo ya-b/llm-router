@@ -1,33 +1,37 @@
 model_list:
   - model_name: model1
     llm_params:
-      api_type: openai # openai, anthropic
-      model: gpt-3.5-turbo
-      api_base: https://ega3235api.opefea6546eghawnai.com/v1
+      api_type: openai  # openai, anthropic
+      model: qwen3-8b
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
+      overrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
+      
   - model_name: model2
     llm_params:
-      api_type: openai # openai, anthropic
-      model: gpt-4
-      api_base: https://aaegagegpi.opefeaf3462ewnai.com/v1
-      api_key: sk-5678
+      api_type: openai
+      model: glm-4.5-flash
+      api_base: https://open.bigmodel.cn/api/paas/v4
+      api_key: sk-1234
+      overrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
+
   - model_name: model3
     llm_params:
       api_type: anthropic # openai, anthropic
-      model: claude-3-opus
-      api_base: https://apigaef.aeawfewnt42hfraweopicd.com/v1
-      api_key: sk-9012
+      model: glm-4.5-flash
+      api_base: https://open.bigmodel.cn/api/anthropic
+      api_key: sk-1234
       
 router_settings:
-  strategy: roundrobin
+  strategy: roundrobin  # roundrobin(平滑加权轮询),random(加权随机)
   model_groups:
-    - name: gpt_models
+    - name: gpt_models # 调用api的时候使用的名称
       models:
-        - name: model1 # default weight 100
-        - name: model2
+        - name: model1 # model_list中定义的model_name。weight默认100
+        - name: model2 
           weight: 100
+
     - name: gpt_models2
       models:
         - name: model1
-
-
+        - name: model3
