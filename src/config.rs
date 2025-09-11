@@ -20,6 +20,8 @@ pub struct LLMParams {
     pub api_key: String,
     #[serde(default = "default_body")]
     pub rewrite_body: String,
+    #[serde(default = "default_headers")]
+    pub rewrite_header: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +57,10 @@ fn default_weight() -> u32 {
 }
 
 fn default_body() -> String {
+    "{}".to_string()
+}
+
+fn default_headers() -> String {
     "{}".to_string()
 }
 

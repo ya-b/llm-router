@@ -80,6 +80,7 @@ model_list:
       model: qwen3-8b
       api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
+      rewrite_header: '{"X-Request-ID": "12345"}' # 非必填
       rewrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
       
   - model_name: model2
@@ -98,30 +99,25 @@ model_list:
       api_key: sk-1234
       
 router_settings:
-  strategy: roundrobin  # roundrobin(平滑加权轮询),random(加权随机)
+  strategy: roundrobin  # roundrobin,random,leastconn
   model_groups:
     - name: gpt_models # 调用api的时候使用的名称
       models:
         - name: model1 # model_list中定义的model_name。weight默认100
         - name: model2 
-          weight: 100
+          weight: 100 # 
 
     - name: gpt_models2
       models:
         - name: model1
         - name: model3
+
 ```
 
-`model_list`每个模型配置包含：
-- `model_name`: router_settings使用的模型名称
-- `llm_params`: 模型的实际参数
-  - `api_type`: 接口类型 # openai, anthropic
-  - `model`: 提供商处的实际模型名称
-  - `api_base`: API 基础 URL
-  - `api_key`: API 密钥
-  - `rewrite_body`: 可选，会覆盖请求体里的参数
-
 `router_settings` 定义路由策略。请求的时候模型名称使用router_settings中定义的name
+roundrobin,random,leastconn 这三种策略都使用weight加权。每次请求失败，weight降低1/2，weight为0时，除非仅剩当前1个模型，否则该模型将不会被使用。
+
+
 
 ### 配置重载
 

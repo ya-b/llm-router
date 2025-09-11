@@ -65,14 +65,49 @@ fn request(api_type: &String, request_json: &Value, model_config: &ModelConfig, 
         target_request = target_request.header("x-api-key", model_config.llm_params.api_key.to_string());
     }
 
+    // Apply rewrite_header functionality
+    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_header) {
+        Ok(serde_json::Value::Object(map)) => {
+            for (k, v) in map {
+                if let Some(header_value) = v.as_str() {
+                    target_request = target_request.header(k, header_value);
+                } else if let Some(header_value) = v.as_i64() {
+                    target_request = target_request.header(k, header_value.to_string());
+                } else if let Some(header_value) = v.as_u64() {
+                    target_request = target_request.header(k, header_value.to_string());
+                } else if let Some(header_value) = v.as_f64() {
+                    target_request = target_request.header(k, header_value.to_string());
+                } else if let Some(header_value) = v.as_bool() {
+                    target_request = target_request.header(k, header_value.to_string());
+                }
+            }
+        },
+        Ok(_) => {warn!("'rewrite_header' parsed error")},
+        Err(_) => {warn!("'rewrite_header' parsed error")}
+    }
+
+    debug!("rewrite_body: {}", &model_config.llm_params.rewrite_body);
+    let mut final_request_json = request_json.clone();
+    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_body) {
+        Ok(serde_json::Value::Object(map)) => {
+            for (k, v) in map {
+                if let Some(obj) = final_request_json.as_object_mut() {
+                    obj.insert(k, v);
+                }
+            }
+        },
+        Ok(_) => {warn!("'rewrite_body' parsed error")},
+        Err(_) => {warn!("'rewrite_body' parsed error")}
+    };
+
     // Use the original request JSON as the target body
     let mut target_body: Value;
     if api_type.eq(&model_config.llm_params.api_type) {
-        target_body = request_json.clone();
+        target_body = final_request_json.clone();
     } else if model_config.llm_params.api_type == "anthropic" {
-        target_body = ApiConverter::openai_to_anthropic_request(&request_json);
+        target_body = ApiConverter::openai_to_anthropic_request(&final_request_json);
     } else {
-        target_body = ApiConverter::anthropic_to_openai_request(&request_json);
+        target_body = ApiConverter::anthropic_to_openai_request(&final_request_json);
     };
 
     // Update the model in the request body
@@ -106,11 +141,19 @@ pub async fn chat_completion(
     debug!("raw request: {}", serde_json::to_string(&request_json).expect("Failed to serialize request"));
 
     let model_manager = config.model_manager.read().await;
-    let model_config = {
+    let (model_config, group_name) = {
         match model_manager.get_model_config(model) {
             Some(config) => {
                 debug!("Found model configuration for: {}", model);
-                Some(config.clone())
+                // Determine the group name - if it's an alias, use that, otherwise use the model name
+                let group = if model_manager.is_alias(model) {
+                    model.to_string()
+                } else {
+                    // For direct model access, we need to find which group it belongs to
+                    // For simplicity, we'll use the model name as group name
+                    model.to_string()
+                };
+                (config.clone(), group)
             }
             None => {
                 info!("Model '{}' not found in configuration", model);
@@ -124,26 +167,19 @@ pub async fn chat_completion(
                 return (StatusCode::NOT_FOUND, Json(error_response)).into_response();
             }
         }
-    }.unwrap(); // Safe to unwrap because we return on None
-
-    let mut final_request_json = request_json.clone();
-    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_body) {
-        Ok(serde_json::Value::Object(map)) => {
-            for (k, v) in map {
-                if let Some(obj) = final_request_json.as_object_mut() {
-                    obj.insert(k, v);
-                }
-            }
-        },
-        Ok(_) => {warn!("'rewrite_body' parsed error")},
-        Err(_) => {warn!("'rewrite_body' parsed error")}
     };
+
+    // Track the start of the request
+    model_manager.start_request(&group_name, &model_config.model_name);
+
     let proxy_url = model_manager.get_proxy();
-    let response = request(&api_type, &final_request_json, &model_config, &proxy_url);
+    let response = request(&api_type, &request_json, &model_config, &proxy_url);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {
             warn!("Failed to send streaming request: {}", e);
+            // Track the failed request
+            model_manager.end_request(&group_name, &model_config.model_name, false);
             let error_response = ErrorResponse {
                 error: ErrorDetail {
                     message: format!("Failed to send request: {}", e),
@@ -158,6 +194,8 @@ pub async fn chat_completion(
         let status = response.status();
         let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         warn!("Non-streaming request failed with status {}: {}", status, error_text);
+        // Track the failed request
+        model_manager.end_request(&group_name, &model_config.model_name, false);
         let error_response = ErrorResponse {
             error: ErrorDetail {
                 message: format!("API error: {}", error_text),
@@ -170,10 +208,16 @@ pub async fn chat_completion(
     // Handle streaming and non-streaming responses
     if stream {
         info!("Processing streaming request");
-        handle_streaming_response(response.bytes_stream(), model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await
+        let result = handle_streaming_response(response.bytes_stream(), model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await;
+        // Track the successful completion of streaming request
+        model_manager.end_request(&group_name, &model_config.model_name, true);
+        result
     } else {
         info!("Processing non-streaming request");
-        handle_non_streaming_response(response, model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await
+        let result = handle_non_streaming_response(response, model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await;
+        // Track the successful completion of non-streaming request
+        model_manager.end_request(&group_name, &model_config.model_name, true);
+        result
     }
 }
 
