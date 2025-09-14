@@ -1,6 +1,6 @@
 mod auth;
 mod config;
-mod converter;
+mod converters;
 mod models;
 mod model_manager;
 mod router;
@@ -11,7 +11,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use config::Config;
-use router::{chat_completion, list_models};
+use router::{anthropic_chat, openai_chat, list_models};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn, Level};
@@ -131,8 +131,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create router
     let app = Router::new()
-        .route("/v1/chat/completions", post(chat_completion))
-        .route("/v1/messages", post(chat_completion))
+        .route("/v1/chat/completions", post(openai_chat))
+        .route("/v1/messages", post(anthropic_chat))
         .route("/v1/models", get(list_models))
         .route("/health", get(|| async { "OK" }))
         .layer(axum::middleware::from_fn_with_state(

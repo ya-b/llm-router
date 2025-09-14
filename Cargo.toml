@@ -23,3 +23,5 @@ uuid = { version = "1.0", features = ["v4"] }
 regex = "1.11.2"
 rand = "0.8"
 tempfile = "3.10.0"
+mockito = "1.7.0"
+http-body-util = "0.1.3"
