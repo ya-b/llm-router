@@ -1,4 +1,7 @@
-use crate::converters::anthropic::{AnthropicContent, AnthropicContentObject, AnthropicRequest};
+use crate::converters::anthropic::{
+    AnthropicContent, AnthropicContentObject, AnthropicRequest, AnthropicSystemContent,
+    AnthropicSystemContentObject,
+};
 use crate::converters::openai::{
     OpenAIContent, OpenAIContentItem, OpenAIFunction, OpenAIImageUrl, OpenAIMessage, OpenAITool,
     OpenAIToolCall, OpenAIToolCallFunction,
@@ -28,9 +31,26 @@ impl From<AnthropicRequest> for OpenAIRequest {
 
         // 添加系统消息
         if let Some(system) = anthropic_request.system {
+            let system_content = match system {
+                AnthropicSystemContent::Text(text) => OpenAIContent::Text(text),
+                AnthropicSystemContent::Array(arr) => {
+                    let items: Vec<OpenAIContentItem> = arr
+                        .into_iter()
+                        .filter_map(|obj| match obj {
+                            AnthropicSystemContentObject::Text { text } => Some(OpenAIContentItem {
+                                r#type: "text".to_string(),
+                                text: Some(text),
+                                image_url: None,
+                            }),
+                        })
+                        .collect();
+                    OpenAIContent::Array(items)
+                }
+            };
+
             messages.push(OpenAIMessage {
                 role: "system".to_string(),
-                content: OpenAIContent::Text(system),
+                content: system_content,
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,

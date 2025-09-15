@@ -9,6 +9,7 @@ pub mod anthropic_response;
 pub mod anthropic_stream_chunk;
 pub mod anthropic_stream_delta;
 pub mod anthropic_stream_message;
+pub mod anthropic_system_content;
 pub mod anthropic_tool;
 pub mod anthropic_usage;
 
@@ -23,5 +24,6 @@ pub use anthropic_response::AnthropicResponse;
 pub use anthropic_stream_chunk::AnthropicStreamChunk;
 pub use anthropic_stream_delta::AnthropicStreamDelta;
 pub use anthropic_stream_message::AnthropicStreamMessage;
+pub use anthropic_system_content::{AnthropicSystemContent, AnthropicSystemContentObject};
 pub use anthropic_tool::AnthropicTool;
 pub use anthropic_usage::AnthropicUsage;

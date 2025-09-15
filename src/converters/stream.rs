@@ -3,6 +3,75 @@ use super::anthropic::{
     AnthropicContentBlock, AnthropicStreamChunk, AnthropicStreamDelta, AnthropicStreamMessage,
 };
 use serde_json::json;
+use crate::config::ApiType;
+
+/// 将单行 SSE `data:` 载荷从 source -> target 转换为输出帧集合。
+/// 返回的 Vec 中，(None, data) 表示 OpenAI 风格的无事件名数据帧；
+/// (Some(event_name), data) 表示 Anthropic 风格的具名事件帧。
+pub fn convert_sse_data_line(
+    source_api_type: ApiType,
+    target_api_type: ApiType,
+    data: &str,
+    model: &String,
+    previous_event: &mut String,
+    previous_delta_type: &mut String,
+    msg_index: &mut i32,
+) -> Vec<(Option<String>, String)> {
+    match (source_api_type, target_api_type) {
+        (ApiType::OpenAI, ApiType::OpenAI) => {
+            if let Ok(mut chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                chunk.model = model.clone();
+                if let Ok(s) = serde_json::to_string(&chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::Anthropic, ApiType::Anthropic) => {
+            if let Ok(mut chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
+                if let AnthropicStreamChunk::MessageStart { mut message } = chunk.clone() {
+                    let mut patched = message.clone();
+                    patched.model = model.clone();
+                    chunk = AnthropicStreamChunk::MessageStart { message: patched };
+                }
+                if let Ok(s) = serde_json::to_string(&chunk) {
+                    return vec![(Some(chunk.stream_type().to_string()), s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::Anthropic, ApiType::OpenAI) => {
+            if let Ok(mut chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
+                if let AnthropicStreamChunk::MessageStart { mut message } = chunk.clone() {
+                    let mut patched = message.clone();
+                    patched.model = model.clone();
+                    chunk = AnthropicStreamChunk::MessageStart { message: patched };
+                }
+                let openai_chunk: OpenAIStreamChunk = chunk.into();
+                if let Ok(s) = serde_json::to_string(&openai_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::OpenAI, ApiType::Anthropic) => {
+            if let Ok(mut chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                chunk.model = model.clone();
+                return openai_to_anthropic_stream_chunks(
+                    &chunk,
+                    model,
+                    previous_event,
+                    previous_delta_type,
+                    msg_index,
+                )
+                .into_iter()
+                .map(|(event, payload)| (Some(event), payload))
+                .collect();
+            }
+            vec![]
+        }
+    }
+}
 
 fn handle_content_block_start_typed(
     anthropic_delta: &AnthropicStreamChunk,
@@ -576,4 +645,3 @@ mod tests {
         assert_eq!(msg_index, 0);
     }
 }
-

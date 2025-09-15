@@ -1,5 +1,5 @@
 use crate::auth::AppState;
-use crate::config::ModelConfig;
+use crate::config::{ModelConfig, ApiType};
 use crate::converters::anthropic::AnthropicStreamChunk;
 use crate::converters::openai::OpenAIStreamChunk;
 use crate::models::{ErrorResponse, ErrorDetail, ModelsResponse, ModelInfo};
@@ -8,7 +8,7 @@ use crate::converters::{
     anthropic::{AnthropicRequest, AnthropicResponse},
     request_wrapper::RequestWrapper,
     response_wrapper::ResponseWrapper,
-    stream::openai_to_anthropic_stream_chunks
+    stream::{openai_to_anthropic_stream_chunks, convert_sse_data_line}
 };
 use anyhow::Result;
 use axum::{
@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 
 fn build_target_url(model_config: &ModelConfig) -> String {
     let api_base = &model_config.llm_params.api_base;
-    let path = if model_config.llm_params.api_type == "anthropic" { "v1/messages" } else { "chat/completions" };
+    let path = if model_config.llm_params.api_type == ApiType::Anthropic { "v1/messages" } else { "chat/completions" };
     
     // Handle the case where api_base might end with a '/'
     if api_base.ends_with('/') {
@@ -58,25 +58,24 @@ fn request(request: &RequestWrapper, model_config: &ModelConfig, proxy_url: &Opt
     }
 
     let mut target_request = client.post(&target_url).header("Content-Type", "application/json");
-    if model_config.llm_params.api_type == "anthropic" {
+    if model_config.llm_params.api_type == ApiType::Anthropic {
         target_request = target_request.header("x-api-key", model_config.llm_params.api_key.to_string());
-    } else if model_config.llm_params.api_type == "openai" {
+    } else if model_config.llm_params.api_type == ApiType::OpenAI {
         target_request = target_request.header("Authorization", format!("Bearer {}", model_config.llm_params.api_key));
     }
 
-    // Apply rewrite_header functionality
-    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_header) {
-        Ok(serde_json::Value::Object(map)) => {
+    // Apply rewrite_header functionality (pre-parsed at config load)
+    match &model_config.llm_params.rewrite_header {
+        serde_json::Value::Object(map) => {
             for (k, v) in map {
                 if !v.is_object() && !v.is_array() {
                     target_request = target_request.header(k, v.to_string());
                 }
             }
-        },
-        Ok(_) => {warn!("'rewrite_header' parsed error")},
-        Err(_) => {warn!("'rewrite_header' parsed error")}
+        }
+        _ => { /* ignore non-object */ }
     }
-    let mut target_body = if model_config.llm_params.api_type == "anthropic" {
+    let mut target_body = if model_config.llm_params.api_type == ApiType::Anthropic {
         let mut anthropic_req: AnthropicRequest = request.get_anthropic();
         anthropic_req.model = model_config.llm_params.model.clone();
         serde_json::to_value(anthropic_req).expect("Failed to serialize converted Anthropic request")
@@ -86,17 +85,13 @@ fn request(request: &RequestWrapper, model_config: &ModelConfig, proxy_url: &Opt
         serde_json::to_value(openai_req).expect("Failed to serialize converted OpenAI request")
     };
 
-    match serde_json::from_str::<serde_json::Value>(&model_config.llm_params.rewrite_body) {
-        Ok(serde_json::Value::Object(map)) => {
-            if let Some(t_body) = target_body.as_object_mut() {
-                for (k, v) in map {
-                    t_body.insert(k, v);
-                }
+    if let serde_json::Value::Object(map) = &model_config.llm_params.rewrite_body {
+        if let Some(t_body) = target_body.as_object_mut() {
+            for (k, v) in map {
+                t_body.insert(k.clone(), v.clone());
             }
-        },
-        Ok(_) => {warn!("'rewrite_body' parsed error")},
-        Err(_) => {warn!("'rewrite_body' parsed error")}
-    };
+        }
+    }
 
     info!("Forwarding request to: {}", target_url);
     debug!("request body: {}", serde_json::to_string(&target_body).expect("Failed to serialize request"));
@@ -108,7 +103,7 @@ pub async fn openai_chat(
     State(config): State<AppState>,
     Json(openai_request): Json<OpenAIRequest>,
 ) -> impl IntoResponse {
-    route_chat("openai".to_string(), config, RequestWrapper::OpenAI(openai_request)).await
+    route_chat(ApiType::OpenAI, config, RequestWrapper::OpenAI(openai_request)).await
 }
 
 #[axum_macros::debug_handler]
@@ -116,12 +111,12 @@ pub async fn anthropic_chat(
     State(config): State<AppState>,
     Json(anthropic_request): Json<AnthropicRequest>,
 ) -> impl IntoResponse {
-    route_chat("anthropic".to_string(), config, RequestWrapper::Anthropic(anthropic_request)).await
+    route_chat(ApiType::Anthropic, config, RequestWrapper::Anthropic(anthropic_request)).await
 }
 
 
 pub async fn route_chat(
-    api_type: String,
+    api_type: ApiType,
     config: AppState,
     request_wrapper: RequestWrapper,
 ) -> impl IntoResponse {
@@ -184,30 +179,38 @@ pub async fn route_chat(
         }
     };
     if !response.status().is_success() {
+        use axum::http::header::CONTENT_TYPE;
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        warn!("Non-streaming request failed with status {}: {}", status, error_text);
+        let content_type = response.headers().get(CONTENT_TYPE).cloned();
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        warn!("Upstream request failed with status {}", status);
         // Track the failed request
         model_manager.end_request(&group_name, &model_config.model_name, false);
-        let error_response = ErrorResponse {
-            error: ErrorDetail {
-                message: format!("API error: {}", error_text),
-                r#type: "api_error".to_string(),
-                code: Some("api_error".to_string()),
-            },
-        };
-        return (StatusCode::BAD_REQUEST, Json(error_response)).into_response()
+
+        let mut resp = (status, body_bytes).into_response();
+        if let Some(ct) = content_type { resp.headers_mut().insert(CONTENT_TYPE, ct); }
+        return resp;
     }
     // Handle streaming and non-streaming responses
     if stream {
         info!("Processing streaming request");
-        let result = handle_streaming_response(response.bytes_stream(), model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await;
+        let result = handle_streaming_response(
+            response.bytes_stream(),
+            model.to_string(),
+            model_config.llm_params.api_type.clone(),
+            api_type.clone(),
+        ).await;
         // Track the successful completion of streaming request
         model_manager.end_request(&group_name, &model_config.model_name, true);
         result
     } else {
         info!("Processing non-streaming request");
-        let result = handle_non_streaming_response(response, model.to_string(), model_config.llm_params.api_type.clone(), api_type.to_string()).await;
+        let result = handle_non_streaming_response(
+            response,
+            model.to_string(),
+            model_config.llm_params.api_type.clone(),
+            api_type.clone(),
+        ).await;
         // Track the successful completion of non-streaming request
         model_manager.end_request(&group_name, &model_config.model_name, true);
         result
@@ -218,8 +221,8 @@ pub async fn route_chat(
 async fn handle_non_streaming_response(
     response: reqwest::Response,
     model: String,
-    source_api_type: String,
-    target_api_type: String
+    source_api_type: ApiType,
+    target_api_type: ApiType
 ) -> axum::response::Response {
     let mut response_json: Value = match response.json().await {
         Ok(resp) => resp,
@@ -241,16 +244,16 @@ async fn handle_non_streaming_response(
         obj.insert("model".to_string(), json!(model));
     }
 
-    let response_wrapper = if source_api_type == "openai" {
+    let response_wrapper = if source_api_type == ApiType::OpenAI {
         let resp: OpenAIResponse = serde_json::from_value(response_json).expect("Failed to deserialize JSON");
-        if target_api_type == "openai" {
+        if target_api_type == ApiType::OpenAI {
             ResponseWrapper::OpenAI(resp)
         } else {
             ResponseWrapper::Anthropic(resp.into())
         }
     } else {
         let resp: AnthropicResponse = serde_json::from_value(response_json).expect("Failed to deserialize JSON");
-        if target_api_type == "openai" {
+        if target_api_type == ApiType::OpenAI {
             ResponseWrapper::OpenAI(resp.into())
         } else {
             ResponseWrapper::Anthropic(resp)
@@ -264,8 +267,8 @@ async fn handle_non_streaming_response(
 async fn handle_streaming_response(
     stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     model: String,
-    source_api_type: String,
-    target_api_type: String
+    source_api_type: ApiType,
+    target_api_type: ApiType
 ) -> axum::response::Response {
     let mut previous_event = "".to_string();
     let mut previous_delta_type = "".to_string();
@@ -279,71 +282,25 @@ async fn handle_streaming_response(
                     debug!("raw streaming response: {:?}", line);
                     if line.starts_with("data: ") {
                         let data = &line[6..];
-                        if data == "[DONE]" && target_api_type == "openai" {
+                        if data == "[DONE]" && target_api_type == ApiType::OpenAI {
                             vec![Ok(Event::default().data("[DONE]"))]
-                        } else if source_api_type == "anthropic" && target_api_type == "anthropic" {
-                            match serde_json::from_str::<AnthropicStreamChunk>(data) {
-                                Ok(mut chunk) => {
-                                    if let AnthropicStreamChunk::MessageStart{ mut message } = chunk.clone() {
-                                        message.model = model.clone();
-                                        chunk = AnthropicStreamChunk::MessageStart{ message: message.clone() };
-                                    }
-                                    if let Ok(chunk_str) = serde_json::to_string(&chunk) {
-                                        vec![Ok(Event::default().event(chunk.stream_type()).data(chunk_str))]
-                                    } else {
-                                        vec![]
-                                    }
-                                },
-                                Err(_) => vec![],
-                            }
-                        } else if source_api_type == "openai" && target_api_type == "openai" {
-                            match serde_json::from_str::<OpenAIStreamChunk>(data) {
-                                Ok(mut chunk) => {
-                                    chunk.model = model.clone();
-                                    if let Ok(chunk_str) = serde_json::to_string(&chunk) {
-                                        vec![Ok(Event::default().data(chunk_str))]
-                                    } else {
-                                        vec![]
-                                    }
-                                },
-                                Err(_) => vec![],
-                            }
-                        } else if source_api_type == "anthropic" && target_api_type == "openai" {
-                            match serde_json::from_str::<AnthropicStreamChunk>(data) {
-                                Ok(mut chunk) => {
-                                    if let AnthropicStreamChunk::MessageStart{ mut message } = chunk.clone() {
-                                        message.model = model.clone();
-                                        chunk = AnthropicStreamChunk::MessageStart{ message: message.clone() };
-                                    }
-                                    let openai_chunk: OpenAIStreamChunk = chunk.into();
-                                    if let Ok(chunk_str) = serde_json::to_string(&openai_chunk) {
-                                        vec![Ok(Event::default().data(chunk_str))]
-                                    } else {
-                                        vec![]
-                                    }
-                                },
-                                Err(_) => vec![],
-                            }
-                        } else if source_api_type == "openai" && target_api_type == "anthropic" {
-                            match serde_json::from_str::<OpenAIStreamChunk>(data) {
-                                Ok(mut chunk) => {
-                                    // Replace the model field
-                                    chunk.model = model.clone();
-                                    openai_to_anthropic_stream_chunks(
-                                        &chunk,
-                                        &model,
-                                        &mut previous_event,
-                                        &mut previous_delta_type,
-                                        &mut msg_index,
-                                    )
-                                    .into_iter()
-                                    .map(|(a, b)| Ok(Event::default().event(a).data(b)))
-                                    .collect()
-                                }
-                                Err(_) => vec![],
-                            }
                         } else {
-                            vec![]
+                            convert_sse_data_line(
+                                source_api_type.clone(),
+                                target_api_type.clone(),
+                                data,
+                                &model,
+                                &mut previous_event,
+                                &mut previous_delta_type,
+                                &mut msg_index,
+                            )
+                            .into_iter()
+                            .map(|(event_opt, payload)| {
+                                let mut ev = Event::default().data(payload);
+                                if let Some(name) = event_opt { ev = ev.event(name); }
+                                Ok(ev)
+                            })
+                            .collect()
                         }
                     } else {
                         vec![]
@@ -456,7 +413,12 @@ mod tests {
         let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
 
 
-        let axum_resp = handle_non_streaming_response(response, "test".to_string(), "openai".to_string(), "openai".to_string()).await;
+        let axum_resp = handle_non_streaming_response(
+            response,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::OpenAI,
+        ).await;
         
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
@@ -522,7 +484,12 @@ mod tests {
         let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
 
 
-        let axum_resp = handle_non_streaming_response(response, "test".to_string(), "openai".to_string(), "anthropic".to_string()).await;
+        let axum_resp = handle_non_streaming_response(
+            response,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::Anthropic,
+        ).await;
         
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
@@ -583,7 +550,12 @@ mod tests {
         let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
 
 
-        let axum_resp = handle_non_streaming_response(response, "test".to_string(), "anthropic".to_string(), "anthropic".to_string()).await;
+        let axum_resp = handle_non_streaming_response(
+            response,
+            "test".to_string(),
+            ApiType::Anthropic,
+            ApiType::Anthropic,
+        ).await;
         
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
@@ -644,7 +616,12 @@ mod tests {
         let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
 
 
-        let axum_resp = handle_non_streaming_response(response, "test".to_string(), "anthropic".to_string(), "openai".to_string()).await;
+        let axum_resp = handle_non_streaming_response(
+            response,
+            "test".to_string(),
+            ApiType::Anthropic,
+            ApiType::OpenAI,
+        ).await;
         
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
@@ -723,7 +700,12 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n")),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "openai".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::OpenAI,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -755,7 +737,12 @@ mod tests {
             Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&anthropic_chunk).unwrap()))),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "anthropic".to_string(), "anthropic".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::Anthropic,
+            ApiType::Anthropic,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -778,7 +765,12 @@ mod tests {
             Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&anthropic_chunk).unwrap()))),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "anthropic".to_string(), "openai".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::Anthropic,
+            ApiType::OpenAI,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -803,7 +795,12 @@ mod tests {
             Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_chunk).unwrap()))),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "anthropic".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::Anthropic,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -854,7 +851,12 @@ mod tests {
             Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_finish).unwrap()))),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "anthropic".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::Anthropic,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -915,7 +917,12 @@ mod tests {
             Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_tool).unwrap()))),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "anthropic".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::Anthropic,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -939,7 +946,12 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n")),
         ]);
 
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "openai".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::OpenAI,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -999,7 +1011,12 @@ data: [DONE]
         }
 
         let s = stream::iter(frames);
-        let resp = handle_streaming_response(s, "test".to_string(), "openai".to_string(), "anthropic".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::OpenAI,
+            ApiType::Anthropic,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1168,7 +1185,12 @@ data: {"type":"message_stop"}
         }
 
         let s = stream::iter(frames);
-        let resp = handle_streaming_response(s, "test".to_string(), "anthropic".to_string(), "openai".to_string()).await;
+        let resp = handle_streaming_response(
+            s,
+            "test".to_string(),
+            ApiType::Anthropic,
+            ApiType::OpenAI,
+        ).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 

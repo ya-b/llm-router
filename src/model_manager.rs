@@ -9,8 +9,6 @@ use tracing::{debug, info, warn};
 pub struct ModelManager {
     config: Arc<Config>,
     proxy: Option<String>,
-    // Key: (group_name, model_name), Value: connection count for the model in the group
-    connection_counts: HashMap<(String, String), AtomicUsize>,
     // Key: (group_name, model_name), Value: current weight for smooth weighted round robin
     current_weights: HashMap<(String, String), AtomicUsize>,
     // Key: (group_name, model_name), Value: active request count for the model in the group
@@ -21,7 +19,6 @@ impl fmt::Debug for ModelManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelManager")
             .field("config", &self.config)
-            .field("connection_counts", &self.connection_counts.keys().collect::<Vec<_>>())
             .field("current_weights", &self.current_weights.keys().collect::<Vec<_>>())
             .field("active_requests", &self.active_requests.keys().collect::<Vec<_>>())
             .finish()
@@ -30,7 +27,6 @@ impl fmt::Debug for ModelManager {
 
 impl ModelManager {
     pub fn new(config: Arc<Config>, proxy: Option<String>) -> Self {
-        let mut connection_counts = HashMap::new();
         let mut current_weights = HashMap::new();
         let mut active_requests = HashMap::new();
         
@@ -39,7 +35,6 @@ impl ModelManager {
             // Initialize connection counts and current weights for each model in the group
             for model in &model_group.models {
                 let key = (model_group.name.clone(), model.name.clone());
-                connection_counts.insert(key.clone(), AtomicUsize::new(0));
                 // Initialize current weight with the model's configured weight
                 current_weights.insert(key.clone(), AtomicUsize::new(model.weight as usize));
                 active_requests.insert(key.clone(), AtomicUsize::new(0));
@@ -49,7 +44,6 @@ impl ModelManager {
         Self {
             config,
             proxy,
-            connection_counts,
             current_weights,
             active_requests,
         }
@@ -59,8 +53,8 @@ impl ModelManager {
         // Create a new instance with the new config and reuse its fields
         let new_manager = Self::new(new_config.clone(), self.get_proxy().clone());
         self.config = new_config;
-        self.connection_counts = new_manager.connection_counts;
         self.current_weights = new_manager.current_weights;
+        self.active_requests = new_manager.active_requests;
     }
 
     pub fn get_proxy(&self) -> Option<String> {
@@ -288,11 +282,6 @@ impl ModelManager {
             debug!("Started request for model {} in group {}, active requests: {}", model_name, group_name, new_count);
         }
         
-        // Also increment connection count for backward compatibility
-        if let Some(connection_count) = self.connection_counts.get(&key) {
-            let new_conn_count = connection_count.fetch_add(1, Ordering::SeqCst) + 1;
-            debug!("Connection count for model {} in group {}: {}", model_name, group_name, new_conn_count);
-        }
     }
 
     /// Track the end of a chat completion request
@@ -304,12 +293,6 @@ impl ModelManager {
             let new_count = active_requests.fetch_sub(1, Ordering::SeqCst) - 1;
             debug!("Ended request for model {} in group {}, success: {}, active requests: {}",
                    model_name, group_name, success, new_count.max(0));
-        }
-        
-        // Also decrement connection count for backward compatibility
-        if let Some(connection_count) = self.connection_counts.get(&key) {
-            let new_conn_count = connection_count.fetch_sub(1, Ordering::SeqCst) - 1;
-            debug!("Connection count for model {} in group {}: {}", model_name, group_name, new_conn_count.max(0));
         }
         
         // Handle failure case
@@ -360,34 +343,34 @@ mod tests {
                 ModelConfig {
                     model_name: "model1".to_string(),
                     llm_params: LLMParams {
-                        api_type: "openai".to_string(),
+                        api_type: crate::config::ApiType::OpenAI,
                         model: "gpt-3.5-turbo".to_string(),
                         api_base: "https://api.openai.com/v1".to_string(),
                         api_key: "test-key".to_string(),
-                        rewrite_body: "{}".to_string(),
-                        rewrite_header: "{}".to_string(),
+                        rewrite_body: serde_json::json!({}),
+                        rewrite_header: serde_json::json!({}),
                     },
                 },
                 ModelConfig {
                     model_name: "model2".to_string(),
                     llm_params: LLMParams {
-                        api_type: "openai".to_string(),
+                        api_type: crate::config::ApiType::OpenAI,
                         model: "gpt-4".to_string(),
                         api_base: "https://api.openai.com/v1".to_string(),
                         api_key: "test-key".to_string(),
-                        rewrite_body: "{}".to_string(),
-                        rewrite_header: "{}".to_string(),
+                        rewrite_body: serde_json::json!({}),
+                        rewrite_header: serde_json::json!({}),
                     },
                 },
                 ModelConfig {
                     model_name: "model3".to_string(),
                     llm_params: LLMParams {
-                        api_type: "openai".to_string(),
+                        api_type: crate::config::ApiType::OpenAI,
                         model: "gpt-4-turbo".to_string(),
                         api_base: "https://api.openai.com/v1".to_string(),
                         api_key: "test-key".to_string(),
-                        rewrite_body: "{}".to_string(),
-                        rewrite_header: "{}".to_string(),
+                        rewrite_body: serde_json::json!({}),
+                        rewrite_header: serde_json::json!({}),
                     },
                 },
             ],

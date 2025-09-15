@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -12,16 +13,23 @@ pub struct ModelConfig {
     pub llm_params: LLMParams,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiType {
+    OpenAI,
+    Anthropic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMParams {
-    pub api_type: String,
+    pub api_type: ApiType,
     pub model: String,
     pub api_base: String,
     pub api_key: String,
-    #[serde(default = "default_body")]
-    pub rewrite_body: String,
-    #[serde(default = "default_headers")]
-    pub rewrite_header: String,
+    #[serde(default = "default_json_object")]
+    pub rewrite_body: Value,
+    #[serde(default = "default_json_object")]
+    pub rewrite_header: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,18 +64,17 @@ fn default_weight() -> u32 {
     100
 }
 
-fn default_body() -> String {
-    "{}".to_string()
-}
-
-fn default_headers() -> String {
-    "{}".to_string()
-}
+fn default_json_object() -> Value { json!({}) }
 
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
+        let mut config: Config = serde_yaml::from_str(&content)?;
+        
+        // Normalize rewrite_body/rewrite_header allowing stringified JSON in YAML
+        for mc in &mut config.model_list {
+            normalize_llm_params(&mut mc.llm_params);
+        }
         
         Self::validate_model_names(&config)?;
         
@@ -125,5 +132,15 @@ impl Config {
         }
         
         Ok(())
+    }
+}
+
+fn normalize_llm_params(params: &mut LLMParams) {
+    // If the YAML provided a quoted JSON string, try to parse into JSON object/value
+    if let Value::String(s) = &params.rewrite_body {
+        if let Ok(v) = serde_json::from_str::<Value>(s) { params.rewrite_body = v; }
+    }
+    if let Value::String(s) = &params.rewrite_header {
+        if let Ok(v) = serde_json::from_str::<Value>(s) { params.rewrite_header = v; }
     }
 }
