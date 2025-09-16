@@ -1,102 +1,20 @@
 use crate::auth::AppState;
-use crate::config::{ModelConfig, ApiType};
-use crate::converters::anthropic::AnthropicStreamChunk;
-use crate::converters::openai::OpenAIStreamChunk;
+use crate::model_manager::Selection;
+use crate::config::ApiType;
 use crate::models::{ErrorResponse, ErrorDetail, ModelsResponse, ModelInfo};
 use crate::converters::{
-    openai::{OpenAIRequest, OpenAIResponse},
-    anthropic::{AnthropicRequest, AnthropicResponse},
+    openai::{OpenAIRequest},
+    anthropic::{AnthropicRequest},
     request_wrapper::RequestWrapper,
-    response_wrapper::ResponseWrapper,
-    stream::{openai_to_anthropic_stream_chunks, convert_sse_data_line}
+    response_handler::{handle_non_streaming_response, handle_streaming_response},
 };
-use anyhow::Result;
 use axum::{
     extract::State,
     http::{StatusCode},
-    response::{sse::{Event, Sse}, IntoResponse},
+    response::{IntoResponse},
     Json,
 };
-use futures::StreamExt;
-use std::time::Duration;
-use bytes::Bytes;
-use futures::{stream, Stream};
-use serde_json::{json, Value};
-use std::convert::Infallible;
 use tracing::{debug, info, warn};
-
-
-fn build_target_url(model_config: &ModelConfig) -> String {
-    let api_base = &model_config.llm_params.api_base;
-    let path = if model_config.llm_params.api_type == ApiType::Anthropic { "v1/messages" } else { "chat/completions" };
-    
-    // Handle the case where api_base might end with a '/'
-    if api_base.ends_with('/') {
-        format!("{}{}", api_base, path)
-    } else {
-        format!("{}/{}", api_base, path)
-    }
-}
-
-fn request(request: &RequestWrapper, model_config: &ModelConfig, proxy_url: &Option<String>) -> impl Future<Output = Result<reqwest::Response, reqwest::Error>> {
-    // Forward request to the target API
-    let client_builder = reqwest::Client::builder();
-    
-    // Configure proxy if provided
-    let client_builder = if let Some(proxy) = proxy_url {
-        let proxy = reqwest::Proxy::all(proxy)
-            .expect("Failed to create proxy");
-        client_builder.proxy(proxy)
-    } else {
-        client_builder
-    };
-    
-    let client = client_builder.build().expect("Failed to build HTTP client");
-    let target_url = build_target_url(model_config);
-    if let Some(proxy) = proxy_url {
-        debug!("Using proxy: {}", proxy);
-    }
-
-    let mut target_request = client.post(&target_url).header("Content-Type", "application/json");
-    if model_config.llm_params.api_type == ApiType::Anthropic {
-        target_request = target_request.header("x-api-key", model_config.llm_params.api_key.to_string());
-    } else if model_config.llm_params.api_type == ApiType::OpenAI {
-        target_request = target_request.header("Authorization", format!("Bearer {}", model_config.llm_params.api_key));
-    }
-
-    // Apply rewrite_header functionality (pre-parsed at config load)
-    match &model_config.llm_params.rewrite_header {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if !v.is_object() && !v.is_array() {
-                    target_request = target_request.header(k, v.to_string());
-                }
-            }
-        }
-        _ => { /* ignore non-object */ }
-    }
-    let mut target_body = if model_config.llm_params.api_type == ApiType::Anthropic {
-        let mut anthropic_req: AnthropicRequest = request.get_anthropic();
-        anthropic_req.model = model_config.llm_params.model.clone();
-        serde_json::to_value(anthropic_req).expect("Failed to serialize converted Anthropic request")
-    } else {
-        let mut openai_req: OpenAIRequest = request.get_openai();
-        openai_req.model = model_config.llm_params.model.clone();
-        serde_json::to_value(openai_req).expect("Failed to serialize converted OpenAI request")
-    };
-
-    if let serde_json::Value::Object(map) = &model_config.llm_params.rewrite_body {
-        if let Some(t_body) = target_body.as_object_mut() {
-            for (k, v) in map {
-                t_body.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    info!("Forwarding request to: {}", target_url);
-    debug!("request body: {}", serde_json::to_string(&target_body).expect("Failed to serialize request"));
-    target_request.json(&target_body).send()
-}
 
 #[axum_macros::debug_handler]
 pub async fn openai_chat(
@@ -128,20 +46,13 @@ pub async fn route_chat(
     
     debug!("raw request: {}", serde_json::to_string(&request_wrapper).expect("Failed to serialize request"));
 
-    let model_manager = config.model_manager.read().await;
-    let (model_config, group_name) = {
-        match model_manager.get_model_config(model) {
-            Some(config) => {
-                debug!("Found model configuration for: {}", model);
-                // Determine the group name - if it's an alias, use that, otherwise use the model name
-                let group = if model_manager.is_alias(model) {
-                    model.to_string()
-                } else {
-                    // For direct model access, we need to find which group it belongs to
-                    // For simplicity, we'll use the model name as group name
-                    model.to_string()
-                };
-                (config.clone(), group)
+    // Narrow read-lock scope to selection only
+    let selection: Selection = {
+        let model_manager = config.model_manager.read().await;
+        match model_manager.resolve(model) {
+            Some(sel) => {
+                debug!("Resolved model selection for: {} -> {:?}", model, sel);
+                sel
             }
             None => {
                 info!("Model '{}' not found in configuration", model);
@@ -158,16 +69,23 @@ pub async fn route_chat(
     };
 
     // Track the start of the request
-    model_manager.start_request(&group_name, &model_config.model_name);
+    {
+        let model_manager = config.model_manager.read().await;
+        model_manager.start(&selection);
+    }
 
-    let proxy_url = model_manager.get_proxy();
-    let response = request(&request_wrapper, &model_config, &proxy_url);
+    let response = config
+        .llm_client
+        .forward_request(&request_wrapper, &selection.config);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {
             warn!("Failed to send streaming request: {}", e);
             // Track the failed request
-            model_manager.end_request(&group_name, &model_config.model_name, false);
+            {
+                let model_manager = config.model_manager.read().await;
+                model_manager.end(&selection, false);
+            }
             let error_response = ErrorResponse {
                 error: ErrorDetail {
                     message: format!("Failed to send request: {}", e),
@@ -185,7 +103,10 @@ pub async fn route_chat(
         let body_bytes = response.bytes().await.unwrap_or_default();
         warn!("Upstream request failed with status {}", status);
         // Track the failed request
-        model_manager.end_request(&group_name, &model_config.model_name, false);
+        {
+            let model_manager = config.model_manager.read().await;
+            model_manager.end(&selection, false);
+        }
 
         let mut resp = (status, body_bytes).into_response();
         if let Some(ct) = content_type { resp.headers_mut().insert(CONTENT_TYPE, ct); }
@@ -197,129 +118,32 @@ pub async fn route_chat(
         let result = handle_streaming_response(
             response.bytes_stream(),
             model.to_string(),
-            model_config.llm_params.api_type.clone(),
+            selection.config.llm_params.api_type.clone(),
             api_type.clone(),
         ).await;
         // Track the successful completion of streaming request
-        model_manager.end_request(&group_name, &model_config.model_name, true);
+        {
+            let model_manager = config.model_manager.read().await;
+            model_manager.end(&selection, true);
+        }
         result
     } else {
         info!("Processing non-streaming request");
         let result = handle_non_streaming_response(
             response,
             model.to_string(),
-            model_config.llm_params.api_type.clone(),
+            selection.config.llm_params.api_type.clone(),
             api_type.clone(),
         ).await;
         // Track the successful completion of non-streaming request
-        model_manager.end_request(&group_name, &model_config.model_name, true);
+        {
+            let model_manager = config.model_manager.read().await;
+            model_manager.end(&selection, true);
+        }
         result
     }
 }
 
-
-async fn handle_non_streaming_response(
-    response: reqwest::Response,
-    model: String,
-    source_api_type: ApiType,
-    target_api_type: ApiType
-) -> axum::response::Response {
-    let mut response_json: Value = match response.json().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            warn!("Failed to parse response: {}", e);
-            let error_response = ErrorResponse {
-                error: ErrorDetail {
-                    message: format!("Failed to parse response: {}", e),
-                    r#type: "api_error".to_string(),
-                    code: Some("parse_error".to_string()),
-                },
-            };
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
-        }
-    };
-    debug!("raw response: {:?}", serde_json::to_string(&response_json));
-    // Replace the model field in the response with the requested model
-    if let Some(obj) = response_json.as_object_mut() {
-        obj.insert("model".to_string(), json!(model));
-    }
-
-    let response_wrapper = if source_api_type == ApiType::OpenAI {
-        let resp: OpenAIResponse = serde_json::from_value(response_json).expect("Failed to deserialize JSON");
-        if target_api_type == ApiType::OpenAI {
-            ResponseWrapper::OpenAI(resp)
-        } else {
-            ResponseWrapper::Anthropic(resp.into())
-        }
-    } else {
-        let resp: AnthropicResponse = serde_json::from_value(response_json).expect("Failed to deserialize JSON");
-        if target_api_type == ApiType::OpenAI {
-            ResponseWrapper::OpenAI(resp.into())
-        } else {
-            ResponseWrapper::Anthropic(resp)
-        }
-    };
-    
-    debug!("Response received with model updated to: {}\n{:?}", model, serde_json::to_string(&response_wrapper));
-    Json(response_wrapper).into_response()
-}
-
-async fn handle_streaming_response(
-    stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
-    model: String,
-    source_api_type: ApiType,
-    target_api_type: ApiType
-) -> axum::response::Response {
-    let mut previous_event = "".to_string();
-    let mut previous_delta_type = "".to_string();
-    let mut msg_index = 0;
-    let event_stream = stream.map(move |result| match result {
-        Ok(bytes) => {
-            let text = String::from_utf8_lossy(&bytes);
-            let lines: Vec<&str> = text.split('\n').collect();
-            let event_stream: Vec<Result<Event, Infallible>> = lines.into_iter()
-                .flat_map(|line| {
-                    debug!("raw streaming response: {:?}", line);
-                    if line.starts_with("data: ") {
-                        let data = &line[6..];
-                        if data == "[DONE]" && target_api_type == ApiType::OpenAI {
-                            vec![Ok(Event::default().data("[DONE]"))]
-                        } else {
-                            convert_sse_data_line(
-                                source_api_type.clone(),
-                                target_api_type.clone(),
-                                data,
-                                &model,
-                                &mut previous_event,
-                                &mut previous_delta_type,
-                                &mut msg_index,
-                            )
-                            .into_iter()
-                            .map(|(event_opt, payload)| {
-                                let mut ev = Event::default().data(payload);
-                                if let Some(name) = event_opt { ev = ev.event(name); }
-                                Ok(ev)
-                            })
-                            .collect()
-                        }
-                    } else {
-                        vec![]
-                    }
-                })
-                .collect();
-            
-            stream::iter(event_stream)
-        }
-        Err(_) => stream::iter(vec![]),
-    })
-    .flatten();
-    
-    // Return SSE with keep-alive
-    Sse::new(event_stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(1)),
-    ).into_response()
-}
 
 #[axum_macros::debug_handler]
 pub async fn list_models(
@@ -361,6 +185,7 @@ mod tests {
     use http_body_util::BodyExt;
     use bytes::Bytes;
     use futures::stream;
+    use serde_json::{json, Value};
 
 
     #[tokio::test]

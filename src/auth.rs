@@ -1,5 +1,6 @@
 use crate::model_manager::ModelManager;
 use crate::models::{ErrorResponse, ErrorDetail};
+use crate::llm_client::LlmClient;
 use axum::{
     body::Body,
     extract::State,
@@ -16,6 +17,7 @@ use tokio::sync::RwLock;
 pub struct AppState {
     pub model_manager: Arc<RwLock<ModelManager>>,
     pub token: Option<String>,
+    pub llm_client: Arc<LlmClient>,
 }
 
 pub async fn require_authorization(

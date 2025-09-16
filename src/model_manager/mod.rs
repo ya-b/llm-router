@@ -1,18 +1,27 @@
 use crate::config::{Config, ModelConfig, RoutingStrategy};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::fmt;
-use rand::Rng;
 use tracing::{debug, info, warn};
 
+mod strategy;
+mod registry;
+mod types;
+mod health;
+
+use types::ModelKey;
+
 pub struct ModelManager {
-    config: Arc<Config>,
-    proxy: Option<String>,
+    pub(super) config: Arc<Config>,
     // Key: (group_name, model_name), Value: current weight for smooth weighted round robin
-    current_weights: HashMap<(String, String), AtomicUsize>,
+    pub(super) current_weights: HashMap<ModelKey, AtomicIsize>,
     // Key: (group_name, model_name), Value: active request count for the model in the group
-    active_requests: HashMap<(String, String), AtomicUsize>,
+    pub(super) active_requests: HashMap<ModelKey, AtomicUsize>,
+    // Per-group lock to make SWRR selection + update atomic across the group
+    pub(super) group_locks: HashMap<String, Mutex<()>>,
+    // Runtime health/weight factors
+    pub(super) health: health::Health,
 }
 
 impl fmt::Debug for ModelManager {
@@ -25,256 +34,109 @@ impl fmt::Debug for ModelManager {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Selection {
+    pub group: Option<String>,
+    pub model_name: String,
+    pub config: ModelConfig,
+}
+
 impl ModelManager {
-    pub fn new(config: Arc<Config>, proxy: Option<String>) -> Self {
+
+    pub fn resolve(&self, hint: &str) -> Option<Selection> {
+        // If it's a group alias
+        if let Some(model_group) = self
+            .config
+            .router_settings
+            .model_groups
+            .iter()
+            .find(|g| g.name == hint)
+        {
+            // Filter valid
+            let registry = registry::Registry::new(&self.config);
+            let valid_models: Vec<crate::config::ModelGroupEntry> =
+                registry.filter_valid_entries(&model_group.models);
+            if valid_models.is_empty() {
+                return None;
+            }
+            let chosen = match self.config.router_settings.strategy {
+                RoutingStrategy::RoundRobin => self.select_round_robin(&model_group.name, &valid_models),
+                RoutingStrategy::LeastConn => self.select_least_conn(&model_group.name, &valid_models),
+                RoutingStrategy::Random => self.select_random(&valid_models),
+            };
+            if chosen.is_empty() { return None; }
+            if let Some(cfg) = self.find_model(&chosen) {
+                return Some(Selection {
+                    group: Some(model_group.name.clone()),
+                    model_name: chosen,
+                    config: cfg.clone(),
+                });
+            }
+            return None;
+        }
+
+        // Otherwise treat as direct model name
+        self.find_model(hint).map(|cfg| Selection {
+            group: None,
+            model_name: hint.to_string(),
+            config: cfg.clone(),
+        })
+    }
+    pub fn new(config: Arc<Config>) -> Self {
         let mut current_weights = HashMap::new();
         let mut active_requests = HashMap::new();
+        let mut group_locks = HashMap::new();
         
         // Initialize counters for all model groups
         for model_group in &config.router_settings.model_groups {
+            // Create a lock per group to guard SWRR selection + updates
+            group_locks
+                .entry(model_group.name.clone())
+                .or_insert_with(|| Mutex::new(()));
             // Initialize connection counts and current weights for each model in the group
             for model in &model_group.models {
-                let key = (model_group.name.clone(), model.name.clone());
-                // Initialize current weight with the model's configured weight
-                current_weights.insert(key.clone(), AtomicUsize::new(model.weight as usize));
+                let key = ModelKey::new(model_group.name.clone(), model.name.clone());
+                // Initialize current weight to 0 for SWRR
+                current_weights.insert(key.clone(), AtomicIsize::new(0));
                 active_requests.insert(key.clone(), AtomicUsize::new(0));
             }
         }
-        
+        let health = health::Health::new_from_config(&config.clone());
         Self {
             config,
-            proxy,
             current_weights,
             active_requests,
+            group_locks,
+            health: health,
         }
     }
     
     pub fn update_config(&mut self, new_config: Arc<Config>) {
         // Create a new instance with the new config and reuse its fields
-        let new_manager = Self::new(new_config.clone(), self.get_proxy().clone());
+        let new_manager = Self::new(new_config.clone());
         self.config = new_config;
         self.current_weights = new_manager.current_weights;
         self.active_requests = new_manager.active_requests;
+        self.group_locks = new_manager.group_locks;
+        self.health = new_manager.health;
     }
 
-    pub fn get_proxy(&self) -> Option<String> {
-        self.proxy.clone()
+    // Helper: find a model config by exact name
+    fn find_model(&self, name: &str) -> Option<&ModelConfig> {
+        self.config.model_list.iter().find(|m| m.model_name == name)
     }
-    
-    pub fn get_model_config(&self, model: &str) -> Option<&ModelConfig> {
-        // First check if the model is in model_group
-        if let Some(model_group) = self.config.router_settings.model_groups.iter().find(|m| m.name == model) {
-            if model_group.models.is_empty() {
-                return None;
-            }
-            
-            if model_group.models.len() == 1 {
-                // If there's only one model in the group, return it directly
-                return self.config.model_list.iter().find(|m| m.model_name == model_group.models[0].name);
-            } else {
-                // Multiple models in the group, use the configured strategy
-                let selected_model_name = match self.config.router_settings.strategy {
-                    RoutingStrategy::RoundRobin => self.select_round_robin(model, &model_group.models),
-                    RoutingStrategy::LeastConn => self.select_least_conn(model, &model_group.models),
-                    RoutingStrategy::Random => self.select_random(&model_group.models),
-                };
-                return self.config.model_list.iter().find(|m| m.model_name == selected_model_name);
-            }
-        }
-        
-        // If not found in group, check direct model name
-        self.config.model_list.iter().find(|m| m.model_name == model)
-    }
-
-    pub fn select_round_robin(&self, group_name: &str, models: &[crate::config::ModelGroupEntry]) -> String {
-        let valid_models: Vec<&crate::config::ModelGroupEntry> = models
-            .iter()
-            .filter(|model| self.model_exists(&model.name))
-            .collect();
-
-        if valid_models.is_empty() {
-            return self.config.model_list.get(0).map_or_else(
-                || {
-                    warn!("No valid models for round robin and model_list is empty.");
-                    String::new()
-                },
-                |m| m.model_name.clone(),
-            );
-        }
-
-        let total_weight: usize = valid_models.iter().map(|model| model.weight as usize).sum();
-        if total_weight == 0 {
-            // If all weights are 0, select one randomly (unweighted)
-            let mut rng = rand::thread_rng();
-            let index = rng.gen_range(0..valid_models.len());
-            return valid_models[index].name.clone();
-        }
-
-        let mut best_models: Vec<&crate::config::ModelGroupEntry> = Vec::new();
-        let mut max_current_weight = isize::MIN;
-
-        for model in &valid_models {
-            if let Some(current_weight_atomic) = self.current_weights.get(&(group_name.to_string(), model.name.clone())) {
-                let current_weight = current_weight_atomic.load(Ordering::SeqCst) as isize;
-                if current_weight > max_current_weight {
-                    max_current_weight = current_weight;
-                    best_models.clear();
-                    best_models.push(model);
-                } else if current_weight == max_current_weight {
-                    best_models.push(model);
-                }
-            }
-        }
-
-        let selected_model = if best_models.len() == 1 {
-            best_models[0]
-        } else if !best_models.is_empty() {
-            // Tie-breaking: randomly select one from the best models
-            let mut rng = rand::thread_rng();
-            let index = rng.gen_range(0..best_models.len());
-            best_models[index]
-        } else {
-            // Fallback if no model was selected for some reason
-            valid_models[0]
-        };
-
-        // Update weights
-        if let Some(current_weight_atomic) = self.current_weights.get(&(group_name.to_string(), selected_model.name.clone())) {
-            current_weight_atomic.fetch_sub(total_weight, Ordering::SeqCst);
-        }
-
-        for model in &valid_models {
-            if let Some(current_weight_atomic) = self.current_weights.get(&(group_name.to_string(), model.name.clone())) {
-                current_weight_atomic.fetch_add(model.weight as usize, Ordering::SeqCst);
-            }
-        }
-
-        selected_model.name.clone()
-    }
-
-    pub fn select_least_conn(&self, group_name: &str, models: &[crate::config::ModelGroupEntry]) -> String {
-        let mut min_score = f64::MAX;
-        let mut best_models: Vec<&crate::config::ModelGroupEntry> = Vec::new();
-
-        let valid_models: Vec<&crate::config::ModelGroupEntry> = models
-            .iter()
-            .filter(|model| self.model_exists(&model.name))
-            .collect();
-
-        if valid_models.is_empty() {
-            return self.config.model_list.get(0).map_or_else(
-                || {
-                    warn!("No valid models in group {} and model_list is empty.", group_name);
-                    String::new()
-                },
-                |m| m.model_name.clone(),
-            );
-        }
-
-        for model_entry in &valid_models {
-            let key = (group_name.to_string(), model_entry.name.clone());
-
-            let active_requests = self.active_requests.get(&key)
-                .map(|count| count.load(Ordering::SeqCst) as f64)
-                .unwrap_or(0.0);
-            
-            let current_weight = self.current_weights.get(&key)
-                .map(|weight| weight.load(Ordering::SeqCst) as f64)
-                .unwrap_or(model_entry.weight as f64);
-            
-            let score = if current_weight > 0.0 {
-                active_requests / current_weight
-            } else {
-                f64::MAX
-            };
-            
-            debug!("Model {} in group {}: active_requests={}, current_weight={}, score={}",
-                   model_entry.name, group_name, active_requests, current_weight, score);
-
-            if score < min_score {
-                min_score = score;
-                best_models.clear();
-                best_models.push(model_entry);
-            } else if (score - min_score).abs() < f64::EPSILON {
-                best_models.push(model_entry);
-            }
-        }
-
-        if best_models.is_empty() {
-            warn!("No suitable model found in group {}, falling back to first valid model in group.", group_name);
-            return valid_models.first().map_or_else(
-                || self.config.model_list.get(0).map_or_else(|| String::new(), |m| m.model_name.clone()),
-                |m| m.name.clone()
-            );
-        }
-
-        if best_models.len() == 1 {
-            return best_models[0].name.clone();
-        }
-        
-        let best_models_owned: Vec<crate::config::ModelGroupEntry> = best_models.into_iter().cloned().collect();
-
-        debug!("Multiple models with best score, using weighted random selection.");
-        self.select_random(&best_models_owned)
-    }
-
-    pub fn select_random(&self, models: &[crate::config::ModelGroupEntry]) -> String {
-        let valid_models: Vec<_> = models
-            .iter()
-            .filter(|model| self.model_exists(&model.name))
-            .collect();
-
-        if valid_models.is_empty() {
-            return self.config.model_list.get(0).map_or_else(
-                || {
-                    warn!("No valid models found for random selection and model_list is empty.");
-                    String::new()
-                },
-                |m| m.model_name.clone(),
-            );
-        }
-
-        let total_weight: u32 = valid_models.iter().map(|m| m.weight).sum();
-        if total_weight == 0 {
-            // If all weights are 0, select one randomly (unweighted)
-            let mut rng = rand::thread_rng();
-            let index = rng.gen_range(0..valid_models.len());
-            return valid_models[index].name.clone();
-        }
-
-        let mut rng = rand::thread_rng();
-        let mut random_weight = rng.gen_range(0..total_weight);
-
-        for model in &valid_models {
-            if random_weight < model.weight {
-                return model.name.clone();
-            }
-            random_weight -= model.weight;
-        }
-
-        // Fallback in case of rounding errors or other unexpected issues.
-        valid_models.last().map_or_else(
-            || self.config.model_list.get(0).map_or_else(|| String::new(), |m| m.model_name.clone()),
-            |m| m.name.clone()
-        )
-    }
-
-    fn model_exists(&self, model_name: &str) -> bool {
+ 
+    pub(super) fn model_exists(&self, model_name: &str) -> bool {
         self.config.model_list.iter().any(|m| m.model_name == model_name)
     }
-
-    
-    pub fn is_alias(&self, model: &str) -> bool {
-        self.config.router_settings.model_groups.iter().find(|x| x.name == model).is_some()
-    }
-
+ 
     pub fn get_config(&self) -> &Arc<Config> {
         &self.config
     }
 
     /// Track the start of a chat completion request
     pub fn start_request(&self, group_name: &str, model_name: &str) {
-        let key = (group_name.to_string(), model_name.to_string());
+        let key = ModelKey::new(group_name.to_string(), model_name.to_string());
         
         // Increment active request count
         if let Some(active_requests) = self.active_requests.get(&key) {
@@ -284,9 +146,16 @@ impl ModelManager {
         
     }
 
+    /// Start using a selection handle
+    pub fn start(&self, selection: &Selection) {
+        if let Some(group) = &selection.group {
+            self.start_request(group, &selection.model_name);
+        }
+    }
+
     /// Track the end of a chat completion request
     pub fn end_request(&self, group_name: &str, model_name: &str, success: bool) {
-        let key = (group_name.to_string(), model_name.to_string());
+        let key = ModelKey::new(group_name.to_string(), model_name.to_string());
         
         // Decrement active request count
         if let Some(active_requests) = self.active_requests.get(&key) {
@@ -295,16 +164,21 @@ impl ModelManager {
                    model_name, group_name, success, new_count.max(0));
         }
         
-        // Handle failure case
+        // Handle health updates
         if !success {
             warn!("Request failed for model {} in group {}, reducing weight", model_name, group_name);
             self.reduce_model_weight(group_name, model_name);
+        } else {
+            self.health.recover_on_success(&key);
         }
     }
 
     /// Reduce the weight of a model by half when it fails
     fn reduce_model_weight(&self, group_name: &str, model_name: &str) {
-        let key = (group_name.to_string(), model_name.to_string());
+        let key = ModelKey::new(group_name.to_string(), model_name.to_string());
+        // Update runtime health factor and breaker state
+        self.health.decay(&key);
+        self.health.on_failure(&key);
         
         // Find the model group and model entry to get the original weight
         if let Some(model_group) = self.config.router_settings.model_groups.iter().find(|g| g.name == group_name) {
@@ -314,18 +188,38 @@ impl ModelManager {
                 // Update current weight (reduce by half, minimum of 1)
                 if let Some(current_weight) = self.current_weights.get(&key) {
                     let mut new_weight;
+                    let mut old_weight;
                     loop {
                         let current = current_weight.load(Ordering::SeqCst);
+                        old_weight = current;
+                        // halve; ensure at least 1
                         new_weight = (current / 2).max(1);
-                        if current_weight.compare_exchange_weak(current, new_weight, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        if current_weight
+                            .compare_exchange_weak(current, new_weight, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
                             break;
                         }
                     }
                     
-                    info!("Reduced weight for model {} in group {} from {} to {}",
-                          model_name, group_name, current_weight.load(Ordering::SeqCst) + new_weight, new_weight);
+                    info!(
+                        "Reduced weight for model {} in group {} from {} to {}",
+                        model_name,
+                        group_name,
+                        old_weight,
+                        new_weight
+                    );
                 }
             }
+        }
+    }
+
+    /// End using a selection handle
+    pub fn end(&self, selection: &Selection, success: bool) {
+        if let Some(group) = &selection.group {
+            self.end_request(group, &selection.model_name, success);
+        } else {
+            // Direct model (no group). Keep current behavior: no counters/health updates.
         }
     }
 
@@ -415,7 +309,7 @@ mod tests {
     #[test]
     fn test_select_round_robin() {
         let config = Arc::new(create_test_config());
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         // Get models from the test_group in the config
         let models = vec![
@@ -470,7 +364,7 @@ mod tests {
         // Remove model2 from model_list to test handling of non-existent models
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {
@@ -499,7 +393,7 @@ mod tests {
     #[test]
     fn test_select_least_conn() {
         let config = Arc::new(create_test_config());
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {
@@ -573,7 +467,7 @@ mod tests {
         // Remove model2 from model_list to test handling of non-existent models
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {
@@ -602,7 +496,7 @@ mod tests {
     #[test]
     fn test_select_random() {
         let config = Arc::new(create_test_config());
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {
@@ -618,8 +512,6 @@ mod tests {
                 weight: 3,
             },
         ];
-        
-        let group_name = "test_group";
         
         // Test random selection multiple times
         let mut selections = Vec::new();
@@ -657,7 +549,7 @@ mod tests {
         // Remove model2 from model_list to test handling of non-existent models
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {
@@ -687,7 +579,7 @@ mod tests {
         // Remove all models from model_list
         config.model_list.clear();
         let config = Arc::new(config);
-        let model_manager = ModelManager::new(config, None);
+        let model_manager = ModelManager::new(config);
         
         let models = vec![
             ModelGroupEntry {

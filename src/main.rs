@@ -4,6 +4,7 @@ mod converters;
 mod models;
 mod model_manager;
 mod router;
+mod llm_client;
 
 use axum::{
     routing::{get, post},
@@ -15,6 +16,7 @@ use router::{anthropic_chat, openai_chat, list_models};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn, Level};
+use std::str::FromStr;
 use tracing_subscriber;
 use notify::{RecursiveMode, Watcher, EventKind};
 use std::path::Path;
@@ -91,17 +93,10 @@ async fn main() -> anyhow::Result<()> {
     let port = args.port;
 
     // Parse log level
-    let log_level = match args.log_level.to_lowercase().as_str() {
-        "error" => Level::ERROR,
-        "warn" => Level::WARN,
-        "info" => Level::INFO,
-        "debug" => Level::DEBUG,
-        "trace" => Level::TRACE,
-        _ => {
-            eprintln!("Invalid log level: {}. Using INFO level.", args.log_level);
-            Level::INFO
-        }
-    };
+    let log_level = Level::from_str(&args.log_level).unwrap_or_else(|_| {
+        eprintln!("Invalid log level: {}. Using INFO level.", args.log_level);
+        Level::INFO
+    });
 
     // Initialize logging
     tracing_subscriber::fmt()
@@ -111,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config_path = args.config.clone();
     // Create model manager with RwLock for dynamic updates
-    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?), args.proxy.clone())));
+    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?))));
     info!("Configuration loaded successfully from: {}", config_path);
 
     // Start config file watcher in a separate task
@@ -123,10 +118,24 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Create a reqwest client
+    let client_builder = reqwest::Client::builder();
+    let client_builder = if let Some(proxy) = &args.proxy {
+        let proxy = reqwest::Proxy::all(proxy).expect("Failed to create proxy");
+        client_builder.proxy(proxy)
+    } else {
+        client_builder
+    };
+    let http_client = Arc::new(client_builder.build().expect("Failed to build HTTP client"));
+
+    // Create LlmClient
+    let llm_client = Arc::new(llm_client::LlmClient::new(http_client));
+
     // Create app state with model manager and token
     let app_state = auth::AppState {
         model_manager: model_manager.clone(),
         token: args.token,
+        llm_client,
     };
 
     // Create router

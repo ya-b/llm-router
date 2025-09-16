@@ -9,8 +9,8 @@ use crate::config::ApiType;
 /// 返回的 Vec 中，(None, data) 表示 OpenAI 风格的无事件名数据帧；
 /// (Some(event_name), data) 表示 Anthropic 风格的具名事件帧。
 pub fn convert_sse_data_line(
-    source_api_type: ApiType,
-    target_api_type: ApiType,
+    source_api_type: &ApiType,
+    target_api_type: &ApiType,
     data: &str,
     model: &String,
     previous_event: &mut String,
@@ -29,7 +29,7 @@ pub fn convert_sse_data_line(
         }
         (ApiType::Anthropic, ApiType::Anthropic) => {
             if let Ok(mut chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
-                if let AnthropicStreamChunk::MessageStart { mut message } = chunk.clone() {
+                if let AnthropicStreamChunk::MessageStart { message } = chunk.clone() {
                     let mut patched = message.clone();
                     patched.model = model.clone();
                     chunk = AnthropicStreamChunk::MessageStart { message: patched };
@@ -42,7 +42,7 @@ pub fn convert_sse_data_line(
         }
         (ApiType::Anthropic, ApiType::OpenAI) => {
             if let Ok(mut chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
-                if let AnthropicStreamChunk::MessageStart { mut message } = chunk.clone() {
+                if let AnthropicStreamChunk::MessageStart { message } = chunk.clone() {
                     let mut patched = message.clone();
                     patched.model = model.clone();
                     chunk = AnthropicStreamChunk::MessageStart { message: patched };

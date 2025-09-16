@@ -11,17 +11,4 @@ pub enum ResponseWrapper {
 }
 
 impl ResponseWrapper {
-    pub fn get_openai(&self) -> OpenAIResponse {
-        match self {
-            ResponseWrapper::OpenAI(resp) => resp.clone(),
-            ResponseWrapper::Anthropic(resp) => resp.clone().into(),
-        }
-    }
-    
-    pub fn get_anthropic(&self) -> AnthropicResponse {
-        match self {
-            ResponseWrapper::Anthropic(resp) => resp.clone(),
-            ResponseWrapper::OpenAI(resp) => resp.clone().into(),
-        }
-    }
 }
