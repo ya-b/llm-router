@@ -47,6 +47,10 @@ struct Args {
     /// socks and http proxy, example: socks5://192.168.0.2:10080
     #[arg(long)]
     proxy: Option<String>,
+
+    /// Check availability of all models in config and exit
+    #[arg(long)]
+    check: bool,
 }
 
 async fn watch_config_file(
@@ -105,18 +109,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config_path = args.config.clone();
-    // Create model manager with RwLock for dynamic updates
-    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(Arc::new(Config::from_file(&config_path)?))));
+    let config = Arc::new(Config::from_file(&config_path)?);
     info!("Configuration loaded successfully from: {}", config_path);
-
-    // Start config file watcher in a separate task
-    let config_path_for_watcher = config_path.clone();
-    let model_manager_for_watcher = model_manager.clone();
-    tokio::spawn(async move {
-        if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
-            warn!("Config file watcher error: {}", e);
-        }
-    });
 
     // Create a reqwest client
     let client_builder = reqwest::Client::builder();
@@ -130,6 +124,24 @@ async fn main() -> anyhow::Result<()> {
 
     // Create LlmClient
     let llm_client = Arc::new(llm_client::LlmClient::new(http_client));
+
+    // If --check is provided, verify all models and exit
+    if args.check {
+        perform_model_checks(&config, &llm_client).await?;
+        return Ok(());
+    }
+
+    // Create model manager with RwLock for dynamic updates
+    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(config.clone())));
+
+    // Start config file watcher in a separate task
+    let config_path_for_watcher = config_path.clone();
+    let model_manager_for_watcher = model_manager.clone();
+    tokio::spawn(async move {
+        if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
+            warn!("Config file watcher error: {}", e);
+        }
+    });
 
     // Create app state with model manager and token
     let app_state = auth::AppState {
@@ -158,4 +170,93 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn perform_model_checks(
+    config: &Arc<Config>,
+    llm_client: &Arc<llm_client::LlmClient>,
+) -> anyhow::Result<()> {
+    use crate::config::ApiType;
+    use crate::converters::request_wrapper::RequestWrapper;
+    use crate::converters::openai::{OpenAIRequest, OpenAIMessage, OpenAIContent};
+    use crate::converters::anthropic::{AnthropicRequest, AnthropicMessage, AnthropicContent};
+    use futures::stream::{self, StreamExt};
+
+    println!("Checking models ({} total):", config.model_list.len());
+    let concurrency: usize = 20;
+    let client = llm_client.clone();
+    let tasks = stream::iter(config.model_list.iter().cloned()).map(|mc| {
+        let client = client.clone();
+        async move {
+            let request = match mc.llm_params.api_type {
+                ApiType::OpenAI => {
+                    let req = OpenAIRequest {
+                        model: mc.model_name.clone(),
+                        messages: vec![OpenAIMessage {
+                            role: "user".to_string(),
+                            content: OpenAIContent::Text("ping".to_string()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        }],
+                        max_tokens: Some(1),
+                        temperature: Some(0.0),
+                        tools: None,
+                        stream: Some(false),
+                        extra_fields: std::collections::HashMap::new(),
+                    };
+                    RequestWrapper::OpenAI(req)
+                }
+                ApiType::Anthropic => {
+                    let req = AnthropicRequest {
+                        model: mc.model_name.clone(),
+                        max_tokens: 1,
+                        messages: Some(vec![AnthropicMessage { role: "user".to_string(), content: AnthropicContent::Text("ping".to_string()) }]),
+                        system: None,
+                        tools: None,
+                        stream: Some(false),
+                        temperature: Some(0.0),
+                        extra_fields: std::collections::HashMap::new(),
+                    };
+                    RequestWrapper::Anthropic(req)
+                }
+            };
+
+            let result = client.forward_request(&request, &mc).await;
+            match result {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        println!(
+                            "[OK] {} -> {} ({})",
+                            mc.model_name,
+                            mc.llm_params.model,
+                            match mc.llm_params.api_type { ApiType::OpenAI => "openai", ApiType::Anthropic => "anthropic" }
+                        );
+                    } else {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+                        println!(
+                            "[FAIL] {} -> {} (status: {})\n  {}",
+                            mc.model_name, mc.llm_params.model, status, truncate(&body, 500)
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "[ERROR] {} -> {}: {}",
+                        mc.model_name, mc.llm_params.model, e
+                    );
+                }
+            }
+        }
+    })
+    .buffer_unordered(concurrency)
+    .collect::<Vec<()>>();
+
+    tasks.await;
+    Ok(())
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len { s.to_string() } else { format!("{}…", &s[..max_len]) }
 }

@@ -23,6 +23,7 @@ Options:
   -t, --token <TOKEN>          
   -l, --log-level <LOG_LEVEL>  trace, debug, info, warn, error [default: warn]
       --proxy <PROXY>          socks and http proxy, example: socks5://192.168.0.2:10080
+      --check                  Check all models in config and exit
   -h, --help                   Print help
 ```
 
@@ -30,6 +31,9 @@ Options:
 
 ```bash
 llm-router --ip 0.0.0.0 --port 8000 --config config.yaml --token your-secret-token
+
+# 检查配置中所有模型的可用性（不启动服务）
+llm-router --config config.yaml --check
 ```
 
 
