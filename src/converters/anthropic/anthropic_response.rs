@@ -32,10 +32,12 @@ impl From<OpenAIResponse> for AnthropicResponse {
             }
         }
         
-        if !openai_resp.choices[0].message.content.trim().is_empty() {
-            content_objects.push(AnthropicContentObject::Text {
-                text: openai_resp.choices[0].message.content.clone()
-            });
+        if let Some(content) = &openai_resp.choices[0].message.content {
+            if !content.trim().is_empty() {
+                content_objects.push(AnthropicContentObject::Text {
+                    text: content.clone()
+                });
+            }
         }
         
         if let Some(tool_calls) = &openai_resp.choices[0].message.tool_calls {
@@ -247,7 +249,7 @@ mod tests {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": ""
+                        "content": null
                     },
                     "finish_reason": "stop"
                 }

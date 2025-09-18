@@ -79,7 +79,11 @@ impl From<AnthropicResponse> for OpenAIResponse {
                 index: 0,
                 message: OpenAIResponseMessage {
                     role: "assistant".to_string(),
-                    content: content_text,
+                    content: if content_text.is_empty() {
+                        None
+                    } else {
+                        Some(content_text)
+                    },
                     reasoning_content: if reasoning_text.is_empty() {
                         None
                     } else {
@@ -147,7 +151,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "Hello, how can I help you today?");
+        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "Hello, how can I help you today?");
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
         if let Some(usage) = &openai_response.usage {
             assert_eq!(usage.prompt_tokens, 9);
@@ -189,7 +193,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "The answer is 42.");
+        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "The answer is 42.");
         assert_eq!(openai_response.choices[0].message.reasoning_content.as_ref().unwrap(), "I need to think about this step by step.");
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
         if let Some(usage) = &openai_response.usage {
@@ -236,7 +240,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "I'll help you get the weather.");
+        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "I'll help you get the weather.");
         assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].id, "tool_123");
         assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].function.name, "get_weather");
         assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].function.arguments, "{\"location\":\"San Francisco, CA\"}");
@@ -268,7 +272,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "");
+        assert_eq!(openai_response.choices[0].message.content, None);
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
     }
 
@@ -299,7 +303,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "I can't share that information.");
+        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "I can't share that information.");
         assert_eq!(openai_response.choices[0].message.reasoning_content.as_ref().unwrap(), "<redacted_thinking>sensitive information</redacted_thinking>");
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
     }
@@ -327,7 +331,7 @@ mod tests {
         
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content, "This is a truncated response because");
+        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "This is a truncated response because");
         assert_eq!(openai_response.choices[0].finish_reason, "length");
     }
 
