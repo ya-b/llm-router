@@ -12,7 +12,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use config::Config;
-use router::{anthropic_chat, openai_chat, list_models};
+use router::{anthropic_chat, openai_chat, gemini_chat, list_models};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn, Level};
@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/messages", post(anthropic_chat))
+        .route("/models/{*tail}", post(gemini_chat))
         .route("/v1/models", get(list_models))
         .route("/health", get(|| async { "OK" }))
         .layer(axum::middleware::from_fn_with_state(
@@ -180,6 +181,7 @@ async fn perform_model_checks(
     use crate::converters::request_wrapper::RequestWrapper;
     use crate::converters::openai::{OpenAIRequest, OpenAIMessage, OpenAIContent};
     use crate::converters::anthropic::{AnthropicRequest, AnthropicMessage, AnthropicContent};
+    use crate::converters::gemini::{GeminiRequest, gemini_content::GeminiContent, gemini_part::GeminiPart, gemini_generation_config::GeminiGenerationConfig};
     use futures::stream::{self, StreamExt};
 
     println!("Checking models ({} total):", config.model_list.len());
@@ -201,6 +203,7 @@ async fn perform_model_checks(
                         }],
                         max_tokens: Some(1),
                         temperature: Some(0.0),
+                        response_format: None,
                         tools: None,
                         stream: Some(false),
                         extra_fields: std::collections::HashMap::new(),
@@ -214,11 +217,24 @@ async fn perform_model_checks(
                         messages: Some(vec![AnthropicMessage { role: "user".to_string(), content: AnthropicContent::Text("ping".to_string()) }]),
                         system: None,
                         tools: None,
+                        metadata: None,
                         stream: Some(false),
                         temperature: Some(0.0),
                         extra_fields: std::collections::HashMap::new(),
                     };
                     RequestWrapper::Anthropic(req)
+                }
+                ApiType::Gemini => {
+                    let req = GeminiRequest {
+                        model: mc.model_name.clone(),
+                        contents: vec![GeminiContent { role: Some("user".to_string()), parts: vec![GeminiPart::Text { text: "ping".to_string(), thought: None, thought_signature: None }] }],
+                        system_instruction: None,
+                        tools: None,
+                        generation_config: Some(GeminiGenerationConfig { response_mime_type: None, response_schema: None, temperature: Some(0.0), max_output_tokens: Some(1), ..Default::default() }),
+                        stream: Some(false),
+                        extra_fields: std::collections::HashMap::new(),
+                    };
+                    RequestWrapper::Gemini(req)
                 }
             };
 
@@ -230,7 +246,7 @@ async fn perform_model_checks(
                             "[OK] {} -> {} ({})",
                             mc.model_name,
                             mc.llm_params.model,
-                            match mc.llm_params.api_type { ApiType::OpenAI => "openai", ApiType::Anthropic => "anthropic" }
+                            match mc.llm_params.api_type { ApiType::OpenAI => "openai", ApiType::Anthropic => "anthropic", ApiType::Gemini => "gemini" }
                         );
                     } else {
                         let status = resp.status();

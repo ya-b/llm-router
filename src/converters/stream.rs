@@ -2,8 +2,62 @@ use super::openai::OpenAIStreamChunk;
 use super::anthropic::{
     AnthropicContentBlock, AnthropicStreamChunk, AnthropicStreamDelta, AnthropicStreamMessage,
 };
+use super::gemini::GeminiStreamChunk;
 use serde_json::json;
 use crate::config::ApiType;
+
+/// Accumulate partial function-call arguments for OpenAI-style chunks.
+///
+/// Returns `true` if we should wait for more chunks (i.e., current accumulated
+/// buffer is not valid JSON yet), otherwise `false` to continue conversion.
+fn accumulate_function_args_and_patch(
+    openai_chunk: &mut OpenAIStreamChunk,
+    previous_function_arg: &mut String,
+) -> bool {
+    // Extract current function-call args (if any)
+    let args: &str = openai_chunk
+        .choices
+        .as_ref()
+        .and_then(|cs| cs.first())
+        .and_then(|c| c.delta.as_ref())
+        .and_then(|d| d.tool_calls.as_ref())
+        .and_then(|tcs| tcs.iter().find(|tc| tc.r#type.as_deref() == Some("function")))
+        .and_then(|tc| tc.function.as_ref())
+        .and_then(|f| f.arguments.as_deref())
+        .unwrap_or("");
+
+    if args.is_empty() {
+        return false;
+    }
+
+    previous_function_arg.push_str(args);
+    let parse_ok = serde_json::from_str::<serde_json::Value>(&previous_function_arg).is_ok();
+    if !parse_ok {
+        // Need to wait for more data to form valid JSON
+        return true;
+    }
+
+    // Parsing succeeded: set function call args to accumulated buffer
+    if let Some(choices) = openai_chunk.choices.as_mut() {
+        if let Some(first) = choices.first_mut() {
+            if let Some(delta) = first.delta.as_mut() {
+                if let Some(tool_calls) = delta.tool_calls.as_mut() {
+                    if let Some(tc) = tool_calls
+                        .iter_mut()
+                        .find(|tc| tc.r#type.as_deref() == Some("function"))
+                    {
+                        if let Some(function) = tc.function.as_mut() {
+                            function.arguments = Some(previous_function_arg.clone());
+                            previous_function_arg.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
 
 /// 将单行 SSE `data:` 载荷从 source -> target 转换为输出帧集合。
 /// 返回的 Vec 中，(None, data) 表示 OpenAI 风格的无事件名数据帧；
@@ -15,12 +69,21 @@ pub fn convert_sse_data_line(
     model: &String,
     previous_event: &mut String,
     previous_delta_type: &mut String,
+    previous_function_arg: &mut String,
     msg_index: &mut i32,
 ) -> Vec<(Option<String>, String)> {
     match (source_api_type, target_api_type) {
         (ApiType::OpenAI, ApiType::OpenAI) => {
             if let Ok(mut chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
                 chunk.model = model.clone();
+                if let Ok(s) = serde_json::to_string(&chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::Gemini, ApiType::Gemini) => {
+            if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
                 if let Ok(s) = serde_json::to_string(&chunk) {
                     return vec![(None, s)];
                 }
@@ -70,6 +133,58 @@ pub fn convert_sse_data_line(
             }
             vec![]
         }
+        (ApiType::Gemini, ApiType::OpenAI) => {
+            if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
+                let openai_chunk: OpenAIStreamChunk = chunk.into();
+                if let Ok(s) = serde_json::to_string(&openai_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::Gemini, ApiType::Anthropic) => {
+            if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
+                let openai_chunk: OpenAIStreamChunk = chunk.into();
+                return openai_to_anthropic_stream_chunks(
+                    &openai_chunk,
+                    model,
+                    previous_event,
+                    previous_delta_type,
+                    msg_index,
+                )
+                .into_iter()
+                .map(|(event, payload)| (Some(event), payload))
+                .collect();
+            }
+            vec![]
+        }
+        (ApiType::Anthropic, ApiType::Gemini) => {
+            if let Ok(anth_chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
+                let mut openai_chunk: OpenAIStreamChunk = anth_chunk.into();
+                if accumulate_function_args_and_patch(&mut openai_chunk, previous_function_arg) {
+                    return vec![];
+                }
+
+                let gemini_chunk: GeminiStreamChunk = openai_chunk.into();
+                if let Ok(s) = serde_json::to_string(&gemini_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        (ApiType::OpenAI, ApiType::Gemini) => {
+            if let Ok(mut openai_chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                if accumulate_function_args_and_patch(&mut openai_chunk, previous_function_arg) {
+                    return vec![];
+                }
+                let gemini_chunk: GeminiStreamChunk = openai_chunk.into();
+                if let Ok(s) = serde_json::to_string(&gemini_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        _ => { vec![] }
     }
 }
 

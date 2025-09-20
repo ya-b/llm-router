@@ -5,6 +5,7 @@ use crate::models::{ErrorResponse, ErrorDetail, ModelsResponse, ModelInfo};
 use crate::converters::{
     openai::{OpenAIRequest},
     anthropic::{AnthropicRequest},
+    gemini::GeminiRequest,
     request_wrapper::RequestWrapper,
     response_handler::{handle_non_streaming_response, handle_streaming_response},
 };
@@ -14,6 +15,8 @@ use axum::{
     response::{IntoResponse},
     Json,
 };
+use axum::extract::Path;
+use serde_json::json;
 use tracing::{debug, info, warn};
 
 #[axum_macros::debug_handler]
@@ -32,12 +35,52 @@ pub async fn anthropic_chat(
     route_chat(ApiType::Anthropic, config, RequestWrapper::Anthropic(anthropic_request)).await
 }
 
+// Gemini API entrypoint compatible with:
+// - POST /models/{model}:generateContent
+// - POST /models/{model}:streamGenerateContent?alt=sse
+#[axum_macros::debug_handler]
+pub async fn gemini_chat(
+    State(config): State<AppState>,
+    Path(path_tail): Path<String>,
+    Json(mut body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Parse model from tail like "models/{model}:generateContent" or "models/{model}:streamGenerateContent"
+    // Our route is defined as /models/*tail, so tail includes "{model}:..."
+    let (model, is_stream) = match path_tail.rsplit_once(":") {
+        Some((model_part, action)) => {
+            let model = model_part.to_string();
+            let is_stream = action == "streamGenerateContent";
+            (model, is_stream)
+        }
+        None => {
+            let error = json!({
+                "error": {"message": "invalid Gemini path", "type": "invalid_request"}
+            });
+            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+        }
+    };
+
+    // Inject routing fields expected by our types
+    body["model"] = json!(model);
+    body["stream"] = json!(is_stream);
+
+    let gemini_request: GeminiRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let error = json!({"error": {"message": format!("invalid request: {}", e), "type": "invalid_request"}});
+            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+        }
+    };
+
+    route_chat(ApiType::Gemini, config, RequestWrapper::Gemini(gemini_request)).await.into_response()
+}
+
 
 pub async fn route_chat(
     api_type: ApiType,
     config: AppState,
     request_wrapper: RequestWrapper,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     
     // Parse the request into the appropriate structure based on API type
     let model = request_wrapper.get_model();

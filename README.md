@@ -4,8 +4,8 @@
 
 ## 功能特性
 
-- 支持 OpenAI、Anthropic 兼容的 API 接口
-- 支持 OpenAI、Anthropic 互相转换
+- 支持 OpenAI、Anthropic、Gemini 兼容的 API 接口
+- 支持 OpenAI、Anthropic、Gemini 互相转换
 - 动态配置重载，无需重启服务
 
 
@@ -43,7 +43,7 @@ llm-router --config config.yaml --check
 curl -X GET http://localhost:8000/v1/models -H "Authorization: Bearer your-secret-token"
 
 
-curl -X POST http://localhost:8000/v1/chat/completions \
+curl "http://localhost:8000/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-secret-token" \
   -d '{
@@ -54,7 +54,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 
 
-curl http://localhost:8000/v1/messages \
+curl "http://localhost:8000/v1/messages" \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-token" \
   -d '{
@@ -62,6 +62,22 @@ curl http://localhost:8000/v1/messages \
     "max_tokens": 1024,
     "messages": [
       {"role": "user", "content": "Hello"}
+    ]
+  }'
+
+
+curl "http://localhost:8000/models/gpt_models:generateContent?alt=sse&key=your-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Hello"
+          }
+        ]
+      }
     ]
   }'
 ```
@@ -89,17 +105,16 @@ model_list:
       
   - model_name: model2
     llm_params:
-      api_type: openai
+      api_type: anthropic
       model: glm-4.5-flash
-      api_base: https://open.bigmodel.cn/api/paas/v4
+      api_base: https://open.bigmodel.cn/api/anthropic
       api_key: sk-1234
-      rewrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
 
   - model_name: model3
     llm_params:
-      api_type: anthropic # openai, anthropic
-      model: glm-4.5-flash
-      api_base: https://open.bigmodel.cn/api/anthropic
+      api_type: gemini # openai, anthropic
+      model: gemini-2.5-pro
+      api_base: https://generativelanguage.googleapis.com/v1beta
       api_key: sk-1234
       
 router_settings:

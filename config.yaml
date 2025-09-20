@@ -1,7 +1,7 @@
 model_list:
   - model_name: model1
     llm_params:
-      api_type: openai  # openai, anthropic
+      api_type: openai  # openai, anthropic, gemini
       model: qwen3-8b
       api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
@@ -10,17 +10,16 @@ model_list:
       
   - model_name: model2
     llm_params:
-      api_type: openai
+      api_type: anthropic
       model: glm-4.5-flash
-      api_base: https://open.bigmodel.cn/api/paas/v4
+      api_base: https://open.bigmodel.cn/api/anthropic
       api_key: sk-1234
-      rewrite_body: '{"metadata": null}'  # claude code通过openai接口调用glm的时候，metadata设为null
 
   - model_name: model3
     llm_params:
-      api_type: anthropic # openai, anthropic
-      model: glm-4.5-flash
-      api_base: https://open.bigmodel.cn/api/anthropic
+      api_type: gemini # openai, anthropic
+      model: gemini-2.5-pro
+      api_base: https://generativelanguage.googleapis.com/v1beta
       api_key: sk-1234
       
 router_settings:

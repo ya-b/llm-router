@@ -18,6 +18,7 @@ pub struct ModelConfig {
 pub enum ApiType {
     OpenAI,
     Anthropic,
+    Gemini,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

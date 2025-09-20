@@ -1,4 +1,5 @@
 use crate::converters::anthropic::{AnthropicContentObject, AnthropicResponse};
+use crate::converters::gemini::{GeminiResponse, GeminiPart, GeminiFinishReason};
 use crate::converters::helpers;
 use crate::converters::openai::{
     OpenAIChoice, OpenAIResponseMessage, OpenAIToolCall, OpenAIToolCallFunction, OpenAIUsage,
@@ -118,6 +119,87 @@ impl From<AnthropicResponse> for OpenAIResponse {
     }
 }
 
+impl From<GeminiResponse> for OpenAIResponse {
+    fn from(resp: GeminiResponse) -> Self {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let (text, reasoning_text, tool_calls, finish_reason) = if let Some(first) = resp.candidates.get(0) {
+            let mut t = String::new();
+            let mut rt = String::new();
+            let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
+            let mut saw_tool_call = false;
+            for (idx, p) in first.content.parts.iter().enumerate() {
+                match p {
+                    GeminiPart::Text { text, thought, thought_signature: _ } => {
+                        if let Some(true) = thought {
+                            rt.push_str(&text);
+                        } else {
+                            t.push_str(&text);
+                        }
+                    },
+                    GeminiPart::InlineData { inline_data: _ } => {},
+                    GeminiPart::FunctionCall { function_call, thought_signature: _ } => {
+                        saw_tool_call = true;
+                        tool_calls.push(OpenAIToolCall {
+                            id: format!("tool_call_{}", idx),
+                            r#type: "function".to_string(),
+                            function: OpenAIToolCallFunction {
+                                name: function_call.name.clone(),
+                                arguments: serde_json::to_string(&function_call.args)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            },
+                        });
+                    },
+                    GeminiPart::FunctionResponse { function_response: _ } => {},
+                }
+            }
+            let fr = if saw_tool_call {
+                "tool_calls".to_string()
+            } else {
+                match first.finish_reason.as_ref() {
+                    Some(GeminiFinishReason::Stop) => "stop".to_string(),
+                    Some(GeminiFinishReason::MaxTokens) => "length".to_string(),
+                    _ => "stop".to_string(),
+                }
+            };
+            (Some(t), Some(rt), if tool_calls.is_empty() { None } else { Some(tool_calls) }, fr)
+        } else {
+            (None, None, None, "stop".to_string())
+        };
+
+        OpenAIResponse {
+            id: format!("gen-{}", now_secs),
+            object: Some("chat.completion".to_string()),
+            created: now_secs,
+            model: resp.model_version.unwrap_or_else(|| "gemini".to_string()),
+            choices: vec![OpenAIChoice {
+                index: 0,
+                message: OpenAIResponseMessage {
+                    role: "assistant".to_string(),
+                    content: text,
+                    reasoning_content: match reasoning_text {
+                        Some(s) if !s.is_empty() => Some(s),
+                        _ => None,
+                    },
+                    tool_calls,
+                },
+                finish_reason,
+            }],
+            usage: resp.usage_metadata.as_ref().map(|u| OpenAIUsage {
+                prompt_tokens: u.prompt_token_count.unwrap_or(0),
+                completion_tokens: u.candidates_token_count.unwrap_or(0),
+                total_tokens: u.total_token_count.unwrap_or(0),
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
+            }),
+            system_fingerprint: None,
+            service_tier: None,
+        }
+    }
+}
 
 
 #[cfg(test)]

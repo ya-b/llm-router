@@ -2,6 +2,7 @@ use crate::converters::anthropic::{
     AnthropicContent, AnthropicContentObject, AnthropicRequest, AnthropicSystemContent,
     AnthropicSystemContentObject,
 };
+use crate::converters::gemini::{GeminiPart, GeminiRequest};
 use crate::converters::openai::{
     OpenAIContent, OpenAIContentItem, OpenAIFunction, OpenAIImageUrl, OpenAIMessage, OpenAITool,
     OpenAIToolCall, OpenAIToolCallFunction,
@@ -18,11 +19,29 @@ pub struct OpenAIRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<OpenAIResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(flatten)]
     pub extra_fields: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIResponseFormat {
+    #[serde(rename = "type")]
+    pub r#type: String, // e.g. "json_object" or "json_schema"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<OpenAIJSONSchemaSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIJSONSchemaSpec {
+    pub name: String,
+    pub schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 impl From<AnthropicRequest> for OpenAIRequest {
@@ -37,11 +56,13 @@ impl From<AnthropicRequest> for OpenAIRequest {
                     let items: Vec<OpenAIContentItem> = arr
                         .into_iter()
                         .filter_map(|obj| match obj {
-                            AnthropicSystemContentObject::Text { text } => Some(OpenAIContentItem {
-                                r#type: "text".to_string(),
-                                text: Some(text),
-                                image_url: None,
-                            }),
+                            AnthropicSystemContentObject::Text { text } => {
+                                Some(OpenAIContentItem {
+                                    r#type: "text".to_string(),
+                                    text: Some(text),
+                                    image_url: None,
+                                })
+                            }
                         })
                         .collect();
                     OpenAIContent::Array(items)
@@ -159,6 +180,7 @@ impl From<AnthropicRequest> for OpenAIRequest {
             messages,
             max_tokens: Some(anthropic_request.max_tokens),
             temperature: None,
+            response_format: None,
             tools: anthropic_request.tools.map(|tools| {
                 tools
                     .into_iter()
@@ -177,5 +199,90 @@ impl From<AnthropicRequest> for OpenAIRequest {
         };
 
         openai_request
+    }
+}
+
+impl From<GeminiRequest> for OpenAIRequest {
+    fn from(g: GeminiRequest) -> Self {
+        let mut messages = Vec::new();
+
+        if let Some(sys) = g.system_instruction {
+            // Flatten system instruction text
+            let mut text = String::new();
+            for p in sys.parts.iter() {
+                if let GeminiPart::Text { text: t, .. } = p {
+                    text.push_str(&t);
+                }
+            }
+            if !text.is_empty() {
+                messages.push(crate::converters::openai::OpenAIMessage {
+                    role: "system".to_string(),
+                    content: OpenAIContent::Text(text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                });
+            }
+        }
+
+        for c in g.contents.into_iter() {
+            let role = match c.role.as_deref() {
+                Some("model") => "assistant",
+                _ => "user",
+            };
+            let mut text = String::new();
+            for p in c.parts.into_iter() {
+                if let GeminiPart::Text { text: t, .. } = p {
+                    text.push_str(&t);
+                }
+            }
+            messages.push(crate::converters::openai::OpenAIMessage {
+                role: role.to_string(),
+                content: OpenAIContent::Text(text),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+
+        // Structured output mapping from Gemini generationConfig -> OpenAI
+        let (resp_mime, resp_schema) = if let Some(gc) = &g.generation_config {
+            (gc.response_mime_type.as_deref(), gc.response_schema.clone())
+        } else {
+            (None, None)
+        };
+        let response_format = match (resp_mime, resp_schema) {
+            (Some(mime), Some(schema)) if mime.eq_ignore_ascii_case("application/json") => {
+                Some(OpenAIResponseFormat {
+                    r#type: "json_schema".to_string(),
+                    json_schema: Some(OpenAIJSONSchemaSpec {
+                        name: "structured_output".to_string(),
+                        schema,
+                        strict: Some(true),
+                    }),
+                })
+            }
+            (Some(mime), None) if mime.eq_ignore_ascii_case("application/json") => {
+                Some(OpenAIResponseFormat {
+                    r#type: "json_object".to_string(),
+                    json_schema: None,
+                })
+            }
+            _ => None,
+        };
+
+        OpenAIRequest {
+            model: g.model,
+            messages,
+            max_tokens: g
+                .generation_config
+                .as_ref()
+                .and_then(|gc| gc.max_output_tokens),
+            temperature: g.generation_config.as_ref().and_then(|gc| gc.temperature),
+            response_format,
+            tools: None,
+            stream: g.stream,
+            extra_fields: g.extra_fields,
+        }
     }
 }

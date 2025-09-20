@@ -1,6 +1,7 @@
 use crate::config::ApiType;
 use crate::converters::anthropic::AnthropicResponse;
 use crate::converters::openai::OpenAIResponse;
+use crate::converters::gemini::GeminiResponse;
 use crate::converters::response_wrapper::ResponseWrapper;
 use crate::converters::stream::convert_sse_data_line;
 use crate::models::{ErrorDetail, ErrorResponse};
@@ -37,13 +38,20 @@ pub async fn handle_non_streaming_response(
         }
     };
     debug!("raw response: {:?}", serde_json::to_string(&response_json));
-    // Replace the model field in the response with the requested model
-    if let Some(obj) = response_json.as_object_mut() {
-        obj.insert("model".to_string(), json!(model));
+    // Replace the model field for OpenAI/Anthropic only. Gemini doesn't use a top-level "model".
+    if matches!(target_api_type, ApiType::OpenAI | ApiType::Anthropic) {
+        if let Some(obj) = response_json.as_object_mut() {
+            obj.insert("model".to_string(), json!(model));
+        }
     }
 
-    let response_wrapper = if source_api_type == ApiType::OpenAI {
-        match serde_json::from_value::<OpenAIResponse>(response_json) {
+    // If caller expects Gemini, pass through the upstream JSON as-is.
+    if matches!(target_api_type, ApiType::Gemini) {
+        return Json(response_json).into_response();
+    }
+
+    let response_wrapper = match source_api_type {
+        ApiType::OpenAI => match serde_json::from_value::<OpenAIResponse>(response_json) {
             Ok(resp) => {
                 if target_api_type == ApiType::OpenAI {
                     ResponseWrapper::OpenAI(resp)
@@ -62,9 +70,8 @@ pub async fn handle_non_streaming_response(
                 };
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
             }
-        }
-    } else {
-        match serde_json::from_value::<AnthropicResponse>(response_json) {
+        },
+        ApiType::Anthropic => match serde_json::from_value::<AnthropicResponse>(response_json) {
             Ok(resp) => {
                 if target_api_type == ApiType::OpenAI {
                     ResponseWrapper::OpenAI(resp.into())
@@ -83,7 +90,28 @@ pub async fn handle_non_streaming_response(
                 };
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
             }
-        }
+        },
+        ApiType::Gemini => match serde_json::from_value::<GeminiResponse>(response_json) {
+            Ok(resp) => {
+                let openai_like: OpenAIResponse = resp.into();
+                if target_api_type == ApiType::OpenAI {
+                    ResponseWrapper::OpenAI(openai_like)
+                } else {
+                    ResponseWrapper::Anthropic(openai_like.into())
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize Gemini response: {}", e);
+                let error_response = ErrorResponse {
+                    error: ErrorDetail {
+                        message: format!("Failed to deserialize response: {}", e),
+                        r#type: "api_error".to_string(),
+                        code: Some("deserialize_error".to_string()),
+                    },
+                };
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            }
+        },
     };
 
     debug!(
@@ -103,6 +131,7 @@ pub async fn handle_streaming_response(
     // Track contextual state needed for conversion
     let mut previous_event = String::new();
     let mut previous_delta_type = String::new();
+    let mut previous_function_arg = String::new();
     let mut msg_index = 0;
 
     // Byte buffer to accumulate partial UTF-8 lines across chunks
@@ -148,6 +177,7 @@ pub async fn handle_streaming_response(
                                             &model,
                                             &mut previous_event,
                                             &mut previous_delta_type,
+                                            &mut previous_function_arg,
                                             &mut msg_index,
                                         );
                                         for (event_opt, payload) in converted.into_iter() {
@@ -190,6 +220,7 @@ pub async fn handle_streaming_response(
                                             &model,
                                             &mut previous_event,
                                             &mut previous_delta_type,
+                                            &mut previous_function_arg,
                                             &mut msg_index,
                                         );
                                         if !converted.is_empty() {

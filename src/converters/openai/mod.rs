@@ -27,6 +27,8 @@ pub use openai_image_url::OpenAIImageUrl;
 pub use openai_message::OpenAIMessage;
 pub use openai_prompt_tokens_details::OpenAIPromptTokensDetails;
 pub use openai_request::OpenAIRequest;
+pub use openai_request::OpenAIResponseFormat;
+pub use openai_request::OpenAIJSONSchemaSpec;
 pub use openai_response::OpenAIResponse;
 pub use openai_response_message::OpenAIResponseMessage;
 pub use openai_stream_choice::OpenAIStreamChoice;
