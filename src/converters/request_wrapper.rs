@@ -1,5 +1,6 @@
 use super::openai::OpenAIRequest;
 use super::anthropic::AnthropicRequest;
+use super::gemini::GeminiRequest;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum RequestWrapper {
     OpenAI(OpenAIRequest),
     Anthropic(AnthropicRequest),
+    Gemini(GeminiRequest),
 }
 
 impl RequestWrapper {
@@ -15,6 +17,7 @@ impl RequestWrapper {
         match self {
             RequestWrapper::OpenAI(req) => req.clone(),
             RequestWrapper::Anthropic(req) => req.clone().into(),
+            RequestWrapper::Gemini(req) => req.clone().into(),
         }
     }
     
@@ -22,6 +25,21 @@ impl RequestWrapper {
         match self {
             RequestWrapper::Anthropic(req) => req.clone(),
             RequestWrapper::OpenAI(req) => req.clone().into(),
+            RequestWrapper::Gemini(req) => {
+                let oai: OpenAIRequest = req.clone().into();
+                oai.into()
+            }
+        }
+    }
+
+    pub fn get_gemini(&self) -> GeminiRequest {
+        match self {
+            RequestWrapper::Gemini(req) => req.clone(),
+            RequestWrapper::OpenAI(req) => req.clone().into(),
+            RequestWrapper::Anthropic(req) => {
+                let oai: OpenAIRequest = req.clone().into();
+                oai.into()
+            }
         }
     }
 
@@ -29,6 +47,7 @@ impl RequestWrapper {
         match self {
             RequestWrapper::OpenAI(req) => &req.model,
             RequestWrapper::Anthropic(req) => &req.model,
+            RequestWrapper::Gemini(req) => &req.model,
         }
     }
 
@@ -36,6 +55,7 @@ impl RequestWrapper {
         match self {
             RequestWrapper::OpenAI(req) => &req.stream,
             RequestWrapper::Anthropic(req) => &req.stream,
+            RequestWrapper::Gemini(req) => &req.stream,
         }
     }
 }

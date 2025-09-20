@@ -1,5 +1,6 @@
 use super::openai::OpenAIResponse;
 use super::anthropic::AnthropicResponse;
+use super::gemini::GeminiResponse;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum ResponseWrapper {
     OpenAI(OpenAIResponse),
     Anthropic(AnthropicResponse),
+    Gemini(GeminiResponse),
 }
 
 impl ResponseWrapper {

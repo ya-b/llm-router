@@ -1,6 +1,6 @@
 use crate::converters::anthropic::{
     AnthropicContent, AnthropicContentObject, AnthropicImageSource, AnthropicMessage,
-    AnthropicSystemContent, AnthropicTool,
+    AnthropicMetadata, AnthropicSystemContent, AnthropicTool,
 };
 use crate::converters::openai::{OpenAIContent, OpenAIRequest};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,8 @@ pub struct AnthropicRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AnthropicMetadata>,
     #[serde(flatten)]
     pub extra_fields: HashMap<String, serde_json::Value>,
 }
@@ -33,6 +35,7 @@ impl From<OpenAIRequest> for AnthropicRequest {
             messages: None,
             system: None,
             tools: None,
+            metadata: None,
             stream: openai_request.stream,
             temperature: openai_request.temperature,
             extra_fields: std::collections::HashMap::new(),

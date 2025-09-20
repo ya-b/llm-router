@@ -2,6 +2,9 @@ use crate::converters::anthropic::{
     AnthropicContentBlock, AnthropicStreamChunk, AnthropicStreamDelta,
 };
 use crate::converters::helpers;
+use crate::converters::gemini::{
+    GeminiCandidate, GeminiFinishReason, GeminiPart, GeminiStreamChunk
+};
 use crate::converters::openai::{
     OpenAIStreamChoice, OpenAIStreamDelta, OpenAIStreamToolCall, OpenAIStreamToolCallFunction,
     OpenAIUsage,
@@ -411,4 +414,132 @@ mod tests {
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], "tool_calls");
     }
+}
+
+impl From<GeminiStreamChunk> for OpenAIStreamChunk {
+    fn from(gemini_chunk: GeminiStreamChunk) -> Self {
+        // Map id and model from Gemini if present
+        let id = gemini_chunk
+            .response_id
+            .unwrap_or_else(|| "chatcmpl-default".to_string());
+        let model = gemini_chunk
+            .model_version
+            .unwrap_or_else(|| "gemini-1.5-pro".to_string());
+
+        // Map candidates to OpenAI choices
+        let choices: Vec<OpenAIStreamChoice> = gemini_chunk
+            .candidates
+            .into_iter()
+            .enumerate()
+            .map(|(idx, cand)| map_gemini_candidate_to_openai_choice(cand, idx as i32))
+            .collect();
+
+        // Map usage if available
+        let usage = gemini_chunk.usage_metadata.map(|u| OpenAIUsage {
+            prompt_tokens: u.prompt_token_count.unwrap_or(0),
+            completion_tokens: u.candidates_token_count.unwrap_or(0),
+            total_tokens: u.total_token_count.unwrap_or(
+                u.prompt_token_count.unwrap_or(0) + u.candidates_token_count.unwrap_or(0),
+            ),
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        });
+
+        OpenAIStreamChunk {
+            id,
+            object: Some("chat.completion.chunk".to_string()),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            model,
+            choices: Some(choices),
+            usage,
+        }
+    }
+}
+
+fn map_gemini_candidate_to_openai_choice(
+    candidate: GeminiCandidate,
+    index: i32,
+) -> OpenAIStreamChoice {
+    // Aggregate delta content from parts
+    let mut role: Option<String> = None;
+    let mut content_acc = String::new();
+    let mut reasoning_acc = String::new();
+    let mut tool_calls: Vec<OpenAIStreamToolCall> = Vec::new();
+
+    if let Some(r) = candidate.content.role {
+        // Gemini uses "model" for assistant
+        role = Some(if r == "model" { "assistant".to_string() } else { r });
+    }
+
+    for part in candidate.content.parts.into_iter() {
+        match part {
+            GeminiPart::Text { text, thought, .. } => {
+                if thought.unwrap_or(false) {
+                    reasoning_acc.push_str(&text);
+                } else {
+                    content_acc.push_str(&text);
+                }
+            }
+            GeminiPart::FunctionCall { function_call, .. } => {
+                // Map to OpenAI tool call
+                let args_str = match serde_json::to_string(&function_call.args) {
+                    Ok(s) => s,
+                    Err(_) => String::new(),
+                };
+                let idx = tool_calls.len() as i32;
+                tool_calls.push(OpenAIStreamToolCall {
+                    index: idx,
+                    id: None,
+                    r#type: Some("function".to_string()),
+                    function: Some(OpenAIStreamToolCallFunction {
+                        name: Some(function_call.name),
+                        arguments: Some(args_str),
+                    }),
+                });
+            }
+            // FunctionResponse and InlineData don't have a direct delta mapping here; ignore
+            _ => {}
+        }
+    }
+
+    let delta = OpenAIStreamDelta {
+        role,
+        content: if content_acc.is_empty() { None } else { Some(content_acc) },
+        reasoning_content: if reasoning_acc.is_empty() {
+            None
+        } else {
+            Some(reasoning_acc)
+        },
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+    };
+
+    let finish_reason = candidate
+        .finish_reason
+        .and_then(map_gemini_finish_reason_to_openai);
+
+    OpenAIStreamChoice {
+        index,
+        delta: Some(delta),
+        finish_reason,
+    }
+}
+
+fn map_gemini_finish_reason_to_openai(fr: GeminiFinishReason) -> Option<String> {
+    use GeminiFinishReason as GFR;
+    let s = match fr {
+        GFR::Stop => "stop",
+        GFR::MaxTokens => "length",
+        // Tool-related
+        GFR::UnexpectedToolCall | GFR::TooManyToolCalls => "tool_calls",
+        // Safety/content filter related
+        GFR::Safety | GFR::Blocklist | GFR::ProhibitedContent | GFR::ImageSafety | GFR::Spii => {
+            "content_filter"
+        }
+        // Others map to unspecified; do not set
+        _ => return None,
+    };
+    Some(s.to_string())
 }
