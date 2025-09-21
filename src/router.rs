@@ -92,7 +92,8 @@ pub async fn route_chat(
     // Narrow read-lock scope to selection only
     let selection: Selection = {
         let model_manager = config.model_manager.read().await;
-        match model_manager.resolve(model) {
+        let request_json = serde_json::to_value(&request_wrapper).unwrap_or_else(|_| json!({}));
+        match model_manager.resolve(model, &request_json) {
             Some(sel) => {
                 debug!("Resolved model selection for: {} -> {:?}", model, sel);
                 sel

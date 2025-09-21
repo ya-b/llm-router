@@ -1,14 +1,15 @@
-use crate::config::{Config, ModelConfig, RoutingStrategy};
+use crate::config::{Config, ModelConfig, ModelGroupEntry, RoutingStrategy};
+use crate::utils::jq_util::run_jaq;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::fmt;
 use tracing::{debug, info, warn};
 
-mod strategy;
-mod registry;
-mod types;
 mod health;
+mod registry;
+mod strategy;
+mod types;
 
 use types::ModelKey;
 
@@ -28,8 +29,14 @@ impl fmt::Debug for ModelManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelManager")
             .field("config", &self.config)
-            .field("current_weights", &self.current_weights.keys().collect::<Vec<_>>())
-            .field("active_requests", &self.active_requests.keys().collect::<Vec<_>>())
+            .field(
+                "current_weights",
+                &self.current_weights.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "active_requests",
+                &self.active_requests.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -42,8 +49,7 @@ pub struct Selection {
 }
 
 impl ModelManager {
-
-    pub fn resolve(&self, hint: &str) -> Option<Selection> {
+    pub fn resolve(&self, hint: &str, request_json: &serde_json::Value) -> Option<Selection> {
         // If it's a group alias
         if let Some(model_group) = self
             .config
@@ -59,12 +65,29 @@ impl ModelManager {
             if valid_models.is_empty() {
                 return None;
             }
-            let chosen = match self.config.router_settings.strategy {
-                RoutingStrategy::RoundRobin => self.select_round_robin(&model_group.name, &valid_models),
-                RoutingStrategy::LeastConn => self.select_least_conn(&model_group.name, &valid_models),
-                RoutingStrategy::Random => self.select_random(&valid_models),
+            // Further filter by selector if provided
+            let filtered_by_selector: Vec<ModelGroupEntry> = valid_models
+                .into_iter()
+                .filter(|e| selector_matches(e, request_json))
+                .collect();
+            let candidate_models: Vec<ModelGroupEntry> = if filtered_by_selector.is_empty() {
+                // If none match selectors, there is no eligible model
+                return None;
+            } else {
+                filtered_by_selector
             };
-            if chosen.is_empty() { return None; }
+            let chosen = match self.config.router_settings.strategy {
+                RoutingStrategy::RoundRobin => {
+                    self.select_round_robin(&model_group.name, &candidate_models)
+                }
+                RoutingStrategy::LeastConn => {
+                    self.select_least_conn(&model_group.name, &candidate_models)
+                }
+                RoutingStrategy::Random => self.select_random(&candidate_models),
+            };
+            if chosen.is_empty() {
+                return None;
+            }
             if let Some(cfg) = self.find_model(&chosen) {
                 return Some(Selection {
                     group: Some(model_group.name.clone()),
@@ -86,7 +109,7 @@ impl ModelManager {
         let mut current_weights = HashMap::new();
         let mut active_requests = HashMap::new();
         let mut group_locks = HashMap::new();
-        
+
         // Initialize counters for all model groups
         for model_group in &config.router_settings.model_groups {
             // Create a lock per group to guard SWRR selection + updates
@@ -110,7 +133,7 @@ impl ModelManager {
             health: health,
         }
     }
-    
+
     pub fn update_config(&mut self, new_config: Arc<Config>) {
         // Create a new instance with the new config and reuse its fields
         let new_manager = Self::new(new_config.clone());
@@ -125,11 +148,14 @@ impl ModelManager {
     fn find_model(&self, name: &str) -> Option<&ModelConfig> {
         self.config.model_list.iter().find(|m| m.model_name == name)
     }
- 
+
     pub(super) fn model_exists(&self, model_name: &str) -> bool {
-        self.config.model_list.iter().any(|m| m.model_name == model_name)
+        self.config
+            .model_list
+            .iter()
+            .any(|m| m.model_name == model_name)
     }
- 
+
     pub fn get_config(&self) -> &Arc<Config> {
         &self.config
     }
@@ -137,13 +163,15 @@ impl ModelManager {
     /// Track the start of a chat completion request
     pub fn start_request(&self, group_name: &str, model_name: &str) {
         let key = ModelKey::new(group_name.to_string(), model_name.to_string());
-        
+
         // Increment active request count
         if let Some(active_requests) = self.active_requests.get(&key) {
             let new_count = active_requests.fetch_add(1, Ordering::SeqCst) + 1;
-            debug!("Started request for model {} in group {}, active requests: {}", model_name, group_name, new_count);
+            debug!(
+                "Started request for model {} in group {}, active requests: {}",
+                model_name, group_name, new_count
+            );
         }
-        
     }
 
     /// Start using a selection handle
@@ -156,17 +184,25 @@ impl ModelManager {
     /// Track the end of a chat completion request
     pub fn end_request(&self, group_name: &str, model_name: &str, success: bool) {
         let key = ModelKey::new(group_name.to_string(), model_name.to_string());
-        
+
         // Decrement active request count
         if let Some(active_requests) = self.active_requests.get(&key) {
             let new_count = active_requests.fetch_sub(1, Ordering::SeqCst) - 1;
-            debug!("Ended request for model {} in group {}, success: {}, active requests: {}",
-                   model_name, group_name, success, new_count.max(0));
+            debug!(
+                "Ended request for model {} in group {}, success: {}, active requests: {}",
+                model_name,
+                group_name,
+                success,
+                new_count.max(0)
+            );
         }
-        
+
         // Handle health updates
         if !success {
-            warn!("Request failed for model {} in group {}, reducing weight", model_name, group_name);
+            warn!(
+                "Request failed for model {} in group {}, reducing weight",
+                model_name, group_name
+            );
             self.reduce_model_weight(group_name, model_name);
         } else {
             self.health.recover_on_success(&key);
@@ -179,12 +215,18 @@ impl ModelManager {
         // Update runtime health factor and breaker state
         self.health.decay(&key);
         self.health.on_failure(&key);
-        
+
         // Find the model group and model entry to get the original weight
-        if let Some(model_group) = self.config.router_settings.model_groups.iter().find(|g| g.name == group_name) {
+        if let Some(model_group) = self
+            .config
+            .router_settings
+            .model_groups
+            .iter()
+            .find(|g| g.name == group_name)
+        {
             if let Some(model_entry) = model_group.models.iter().find(|m| m.name == model_name) {
                 let _original_weight = model_entry.weight as usize;
-                
+
                 // Update current weight (reduce by half, minimum of 1)
                 if let Some(current_weight) = self.current_weights.get(&key) {
                     let mut new_weight;
@@ -195,19 +237,21 @@ impl ModelManager {
                         // halve; ensure at least 1
                         new_weight = (current / 2).max(1);
                         if current_weight
-                            .compare_exchange_weak(current, new_weight, Ordering::SeqCst, Ordering::SeqCst)
+                            .compare_exchange_weak(
+                                current,
+                                new_weight,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            )
                             .is_ok()
                         {
                             break;
                         }
                     }
-                    
+
                     info!(
                         "Reduced weight for model {} in group {} from {} to {}",
-                        model_name,
-                        group_name,
-                        old_weight,
-                        new_weight
+                        model_name, group_name, old_weight, new_weight
                     );
                 }
             }
@@ -222,13 +266,14 @@ impl ModelManager {
             // Direct model (no group). Keep current behavior: no counters/health updates.
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ModelConfig, RoutingStrategy, ModelGroup, ModelGroupEntry, LLMParams};
+    use crate::config::{
+        Config, LLMParams, ModelConfig, ModelGroup, ModelGroupEntry, RoutingStrategy,
+    };
 
     // Helper function to create a test config
     fn create_test_config() -> Config {
@@ -277,14 +322,17 @@ mod tests {
                             ModelGroupEntry {
                                 name: "model1".to_string(),
                                 weight: 1,
+                                selector: None,
                             },
                             ModelGroupEntry {
                                 name: "model2".to_string(),
                                 weight: 2,
+                                selector: None,
                             },
                             ModelGroupEntry {
                                 name: "model3".to_string(),
                                 weight: 3,
+                                selector: None,
                             },
                         ],
                     },
@@ -294,10 +342,12 @@ mod tests {
                             ModelGroupEntry {
                                 name: "model1".to_string(),
                                 weight: 1,
+                                selector: None,
                             },
                             ModelGroupEntry {
                                 name: "model3".to_string(),
                                 weight: 1,
+                                selector: None,
                             },
                         ],
                     },
@@ -310,46 +360,49 @@ mod tests {
     fn test_select_round_robin() {
         let config = Arc::new(create_test_config());
         let model_manager = ModelManager::new(config);
-        
+
         // Get models from the test_group in the config
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(),
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         let group_name = "test_group";
-        
+
         // Test round-robin selection multiple times to get a better distribution
         let mut selections = Vec::new();
         for _ in 0..6 {
             let selected = model_manager.select_round_robin(group_name, &models);
             selections.push(selected);
         }
-        
+
         // Print the actual selections for debugging
         println!("Selections: {:?}", selections);
-        
+
         // Check that all models were selected at least once
         let model3_count = selections.iter().filter(|s| s.as_str() == "model3").count();
         let model2_count = selections.iter().filter(|s| s.as_str() == "model2").count();
         let model1_count = selections.iter().filter(|s| s.as_str() == "model1").count();
-        
+
         // With a small number of selections, we can't guarantee exact distribution,
         // but we can check that all models were selected at least once
         assert!(model3_count == 3);
         assert!(model2_count == 2);
         assert!(model1_count == 1);
-        
+
         // The algorithm should distribute selections based on weights, but with a small
         // number of selections, we can't guarantee the exact order
         // Let's just check that the function returns valid model names
@@ -357,7 +410,7 @@ mod tests {
             assert!(selection == "model1" || selection == "model2" || selection == "model3");
         }
     }
-    
+
     #[test]
     fn test_select_round_robin_with_nonexistent_models() {
         let mut config = create_test_config();
@@ -365,102 +418,108 @@ mod tests {
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(), // This model doesn't exist in model_list
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         let group_name = "test_group";
-        
+
         // Test that non-existent models are filtered out
         let selected = model_manager.select_round_robin(group_name, &models);
-        
+
         // Should select from existing models (model1 and model3)
         assert!(selected == "model1" || selected == "model3");
     }
-    
+
     #[test]
     fn test_select_least_conn() {
         let config = Arc::new(create_test_config());
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(),
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         let group_name = "test_group";
-        
+
         // Initially, all models have 0 connections, so it should select based on weight
         // With equal connections, higher weight models are preferred
         let selected = model_manager.select_least_conn(group_name, &models);
         println!("Initial selection: {}", selected);
         assert!(selected == "model1" || selected == "model2" || selected == "model3");
-        
+
         // Add connections to model3 to make it less preferred
         for _ in 0..5 {
             model_manager.start_request(group_name, "model3");
         }
-        
+
         // Now model3 has more connections, check the selection
         let selected = model_manager.select_least_conn(group_name, &models);
         println!("After adding connections to model3: {}", selected);
         assert!(selected == "model1" || selected == "model2" || selected == "model3");
-        
+
         // Add connections to model2 to make it less preferred
         for _ in 0..5 {
             model_manager.start_request(group_name, "model2");
         }
-        
+
         // Now model2 has more connections, check the selection
         let selected = model_manager.select_least_conn(group_name, &models);
         println!("After adding connections to model2: {}", selected);
         assert!(selected == "model1" || selected == "model2" || selected == "model3");
-        
+
         // Add connections to model1 to make it less preferred
         for _ in 0..5 {
             model_manager.start_request(group_name, "model1");
         }
-        
+
         // Now model1 has more connections, check the selection
         let selected = model_manager.select_least_conn(group_name, &models);
         println!("After adding connections to model1: {}", selected);
         assert!(selected == "model1" || selected == "model2" || selected == "model3");
-        
+
         // Reset all connections by ending them
         for _ in 0..5 {
             model_manager.end_request(group_name, "model1", true);
             model_manager.end_request(group_name, "model2", true);
             model_manager.end_request(group_name, "model3", true);
         }
-        
+
         // Now all models should have 0 connections again, check the selection
         let selected = model_manager.select_least_conn(group_name, &models);
         println!("After resetting connections: {}", selected);
         assert!(selected == "model1" || selected == "model2" || selected == "model3");
     }
-    
+
     #[test]
     fn test_select_least_conn_with_nonexistent_models() {
         let mut config = create_test_config();
@@ -468,81 +527,87 @@ mod tests {
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(), // This model doesn't exist in model_list
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         let group_name = "test_group";
-        
+
         // Test that non-existent models are filtered out
         let selected = model_manager.select_least_conn(group_name, &models);
-        
+
         // Should select from existing models (model1 and model3)
         assert!(selected == "model1" || selected == "model3");
     }
-    
+
     #[test]
     fn test_select_random() {
         let config = Arc::new(create_test_config());
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(),
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         // Test random selection multiple times
         let mut selections = Vec::new();
         for _ in 0..1000 {
             let selected = model_manager.select_random(&models);
             selections.push(selected);
         }
-        
+
         // Check that all models are selected
         assert!(selections.contains(&"model1".to_string()));
         assert!(selections.contains(&"model2".to_string()));
         assert!(selections.contains(&"model3".to_string()));
-        
+
         // Check that selection frequency roughly matches weights
         let model1_count = selections.iter().filter(|s| s.as_str() == "model1").count();
         let model2_count = selections.iter().filter(|s| s.as_str() == "model2").count();
         let model3_count = selections.iter().filter(|s| s.as_str() == "model3").count();
-        
+
         // With weights 1, 2, 3, the ratios should be approximately 1:2:3
         // Allow some tolerance for randomness
         let total = model1_count + model2_count + model3_count;
         let model1_ratio = model1_count as f64 / total as f64;
         let model2_ratio = model2_count as f64 / total as f64;
         let model3_ratio = model3_count as f64 / total as f64;
-        
+
         // Expected ratios: 1/6, 2/6, 3/6
-        assert!((model1_ratio - 1.0/6.0).abs() < 0.1);
-        assert!((model2_ratio - 2.0/6.0).abs() < 0.1);
-        assert!((model3_ratio - 3.0/6.0).abs() < 0.1);
+        assert!((model1_ratio - 1.0 / 6.0).abs() < 0.1);
+        assert!((model2_ratio - 2.0 / 6.0).abs() < 0.1);
+        assert!((model3_ratio - 3.0 / 6.0).abs() < 0.1);
     }
-    
+
     #[test]
     fn test_select_random_with_nonexistent_models() {
         let mut config = create_test_config();
@@ -550,29 +615,32 @@ mod tests {
         config.model_list.retain(|m| m.model_name != "model2");
         let config = Arc::new(config);
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(),
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(), // This model doesn't exist in model_list
                 weight: 2,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model3".to_string(),
                 weight: 3,
+                selector: None,
             },
         ];
-        
+
         // Test that non-existent models are filtered out
         let selected = model_manager.select_random(&models);
-        
+
         // Should select from existing models (model1 and model3)
         assert!(selected == "model1" || selected == "model3");
     }
-    
+
     #[test]
     fn test_select_random_with_all_nonexistent_models() {
         let mut config = create_test_config();
@@ -580,23 +648,45 @@ mod tests {
         config.model_list.clear();
         let config = Arc::new(config);
         let model_manager = ModelManager::new(config);
-        
+
         let models = vec![
             ModelGroupEntry {
                 name: "model1".to_string(), // Doesn't exist
                 weight: 1,
+                selector: None,
             },
             ModelGroupEntry {
                 name: "model2".to_string(), // Doesn't exist
                 weight: 2,
+                selector: None,
             },
         ];
-        
+
         // When all models are non-existent and the model_list is empty,
         // the function should handle this gracefully by returning an empty string.
         let selected = model_manager.select_random(&models);
-        
+
         // Check that the function returns an empty string and does not panic.
         assert!(selected.is_empty());
+    }
+}
+
+fn selector_matches(entry: &ModelGroupEntry, request_json: &serde_json::Value) -> bool {
+    // Empty or missing selector matches any request
+    match entry.selector.as_deref() {
+        None => true,
+        Some(s) if s.trim().is_empty() => true,
+        Some(s) => {
+            let output = run_jaq(&s, &request_json);
+            if output.is_none() {
+                return false;
+            }
+            let output = output.unwrap();
+            let out_trim = output.trim();
+            if out_trim.is_empty() {
+                return false;
+            }
+            out_trim == "true"
+        }
     }
 }

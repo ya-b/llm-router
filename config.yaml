@@ -17,7 +17,7 @@ model_list:
 
   - model_name: model3
     llm_params:
-      api_type: gemini # openai, anthropic
+      api_type: gemini
       model: gemini-2.5-pro
       api_base: https://generativelanguage.googleapis.com/v1beta
       api_key: sk-1234
@@ -28,8 +28,10 @@ router_settings:
     - name: gpt_models # 调用api的时候使用的名称
       models:
         - name: model1 # model_list中定义的model_name。weight默认100
+          selector: '.tools | length == 0'
         - name: model2 
-          weight: 100 # 每次请求失败，weight降低1/2，weight最小为0
+          weight: 100
+          selector: '.tools | length > 0' # jq表达式返回true时才可能会选择该模型，规则参考https://jqlang.org/manual/
 
     - name: gpt_models2
       models:

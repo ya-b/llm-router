@@ -5,6 +5,7 @@ mod models;
 mod model_manager;
 mod router;
 mod llm_client;
+mod utils;
 
 use axum::{
     routing::{get, post},
@@ -135,13 +136,13 @@ async fn main() -> anyhow::Result<()> {
     let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(config.clone())));
 
     // Start config file watcher in a separate task
-    let config_path_for_watcher = config_path.clone();
-    let model_manager_for_watcher = model_manager.clone();
-    tokio::spawn(async move {
-        if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
-            warn!("Config file watcher error: {}", e);
-        }
-    });
+    // let config_path_for_watcher = config_path.clone();
+    // let model_manager_for_watcher = model_manager.clone();
+    // tokio::spawn(async move {
+    //     if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
+    //         warn!("Config file watcher error: {}", e);
+    //     }
+    // });
 
     // Create app state with model manager and token
     let app_state = auth::AppState {
@@ -154,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/messages", post(anthropic_chat))
-        .route("/models/{*tail}", post(gemini_chat))
+        .route("/v1beta/models/{*tail}", post(gemini_chat))
         .route("/v1/models", get(list_models))
         .route("/health", get(|| async { "OK" }))
         .layer(axum::middleware::from_fn_with_state(

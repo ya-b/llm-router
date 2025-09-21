@@ -1127,7 +1127,14 @@ mod tests {
             "usageMetadata": {
                 "promptTokenCount": 170,
                 "candidatesTokenCount": 113,
-                "totalTokenCount": 283
+                "totalTokenCount": 283,
+                "promptTokensDetails": [
+                    {
+                        "modality": "TEXT",
+                        "tokenCount": 246
+                    }
+                ],
+                "thoughtsTokenCount": 148
             },
             "modelVersion": "gemini-1.5-pro",
             "responseId": "resp_1"

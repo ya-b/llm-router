@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use crate::utils::jq_util::check_jaq_filter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -59,6 +60,9 @@ pub struct ModelGroupEntry {
     pub name: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
+    // Optional jq selector; when present and non-empty, request must satisfy it
+    #[serde(default)]
+    pub selector: Option<String>,
 }
 
 fn default_weight() -> u32 {
@@ -82,6 +86,9 @@ impl Config {
         Self::validate_model_group_names(&config)?;
         
         Self::validate_model_group_model_names(&config)?;
+
+        // Validate selectors in model groups (non-empty only)
+        Self::validate_model_group_selectors(&config)?;
         
         Ok(config)
     }
@@ -132,6 +139,26 @@ impl Config {
             }
         }
         
+        Ok(())
+    }
+
+    fn validate_model_group_selectors(config: &Config) -> anyhow::Result<()> {
+        for group in &config.router_settings.model_groups {
+            for entry in &group.models {
+                if let Some(selector) = &entry.selector {
+                    if !selector.trim().is_empty() {
+                        if !check_jaq_filter(selector) {
+                            return Err(anyhow::anyhow!(
+                                "Invalid jq selector for model '{}' in group '{}': {}",
+                                entry.name,
+                                group.name,
+                                selector
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

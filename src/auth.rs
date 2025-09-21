@@ -35,7 +35,7 @@ pub async fn require_authorization(
     }
 
     let path = request.uri().path();
-    let provided_token = if path.starts_with("/v1/chat/completions") {
+    let mut provided_token = if path.starts_with("/v1/chat/completions") {
         request
             .headers()
             .get("Authorization")
@@ -50,7 +50,7 @@ pub async fn require_authorization(
             .and_then(|hv| hv.to_str().ok())
             .map(|s| s.trim())
             .map(|s| s)
-    } else if path.starts_with("/models/") {
+    } else if path.starts_with("/v1beta/models/") {
         request
             .uri()
             .query()
@@ -77,6 +77,16 @@ pub async fn require_authorization(
     } else {
         None
     };
+
+    if provided_token.is_none() {
+        provided_token = request
+            .headers()
+            .get("Authorization")
+            .and_then(|hv| hv.to_str().ok())
+            .map(|s| s.trim())
+            .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.trim()))
+            .map(|s| s);
+    }
 
     if provided_token.is_none() {
         info!("Missing authentication token for path: {}", path);

@@ -1,18 +1,20 @@
 # LLM Router
 
-[中文说明 (Chinese README)](README_zh.md)
+[English README](README.md)
 
-A router server for OpenAI‑compatible API requests.
+一个用于路由openai compatible api请求的服务器。
 
-## Features
+## 功能特性
 
-- Supports OpenAI, Anthropic, and Gemini compatible API endpoints
-- Converts requests/responses across OpenAI, Anthropic, and Gemini
-- Model selection via jq expressions (full jq syntax supported)
+- 支持 OpenAI、Anthropic、Gemini 兼容的 API 接口
+- 支持 OpenAI、Anthropic、Gemini 互相转换
+- 基于jq表达式选择模型，支持jq语法
 
-## CLI
+## 命令行参数
 
-```
+程序支持以下命令行参数：
+
+```bash
 Usage: llm-router [OPTIONS]
 
 Options:
@@ -21,24 +23,26 @@ Options:
   -c, --config <CONFIG>        Path to config file [default: config.yaml]
   -t, --token <TOKEN>
   -l, --log-level <LOG_LEVEL>  trace, debug, info, warn, error [default: warn]
-      --proxy <PROXY>          socks and http proxy, e.g. socks5://192.168.0.2:10080
+      --proxy <PROXY>          socks and http proxy, example: socks5://192.168.0.2:10080
       --check                  Check all models in config and exit
   -h, --help                   Print help
 ```
 
-### Examples
+### 使用示例
 
-```
+```bash
 llm-router --ip 0.0.0.0 --port 8000 --config config.yaml --token your-secret-token
 
-# Check availability of all models (without starting the server)
+# 检查配置中所有模型的可用性（不启动服务）
 llm-router --config config.yaml --check
 ```
 
-## API Usage
 
-```
+## API 使用
+
+```bash
 curl -X GET http://localhost:8000/v1/models -H "Authorization: Bearer your-secret-token"
+
 
 curl "http://localhost:8000/v1/chat/completions" \
   -H "Content-Type: application/json" \
@@ -49,6 +53,7 @@ curl "http://localhost:8000/v1/chat/completions" \
       {"role": "user", "content": "Hello"}
     ]
   }'
+
 
 curl "http://localhost:8000/v1/messages" \
   -H "Content-Type: application/json" \
@@ -61,6 +66,7 @@ curl "http://localhost:8000/v1/messages" \
     ]
   }'
 
+
 curl "http://localhost:8000/v1beta/models/gpt_models:generateContent?alt=sse&key=your-secret-token" \
   -H "Content-Type: application/json" \
   -d '{
@@ -68,20 +74,24 @@ curl "http://localhost:8000/v1beta/models/gpt_models:generateContent?alt=sse&key
       {
         "role": "user",
         "parts": [
-          { "text": "Hello" }
+          {
+            "text": "Hello"
+          }
         ]
       }
     ]
   }'
 ```
 
-## Configuration
 
-### Config file
+## 配置
 
-When calling APIs, use the value of the `name` field under `router_settings.model_groups` as the model name.
+### 配置文件
 
-The project uses a YAML config file `config.yaml` with the following structure:
+调用接口的时候，使用**router_settings.model_groups**中的**name**字段的值
+
+项目使用 YAML 格式的配置文件 `config.yaml`，包含以下部分：
+
 
 ```yaml
 model_list:
@@ -91,8 +101,8 @@ model_list:
       model: qwen3-8b
       api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: sk-1234
-      rewrite_header: '{"X-Request-ID": "12345"}' # optional
-      rewrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # optional
+      rewrite_header: '{"X-Request-ID": "12345"}' # 非必填
+      rewrite_body: '{"enable_thinking": false, "max_tokens": 8192}' # 非必填
 
   - model_name: model2
     llm_params:
@@ -109,15 +119,15 @@ model_list:
       api_key: sk-1234
 
 router_settings:
-  strategy: roundrobin  # roundrobin, random, leastconn
+  strategy: roundrobin  # roundrobin,random,leastconn
   model_groups:
-    - name: gpt_models # the name used when calling APIs
+    - name: gpt_models # 调用api的时候使用的名称
       models:
-        - name: model1 # refers to model_list.model_name; weight defaults to 100
+        - name: model1 # model_list中定义的model_name。weight默认100
           selector: '.tools | length == 0'
         - name: model2
           weight: 100
-          selector: '.tools | length > 0' # select only when jq evaluates to true; see https://jqlang.org/manual/
+          selector: '.tools | length > 0' # jq表达式返回true时才可能会选择该模型，规则参考https://jqlang.org/manual/
 
     - name: gpt_models2
       models:
@@ -125,8 +135,7 @@ router_settings:
         - name: model3
 ```
 
-`router_settings` defines routing strategies. When making requests, use the `name` defined under `router_settings.model_groups` as the model name.
+`router_settings` 定义路由策略。请求的时候模型名称使用router_settings中定义的name
+roundrobin,random,leastconn 这三种策略都使用weight加权。每次请求失败，weight降低1/2，weight为0时，除非仅剩当前1个模型，否则该模型将不会被使用。
 
-For `roundrobin`, `random`, and `leastconn`, weights are applied. On each failure, a model’s weight is halved. When a model’s weight reaches 0, it will not be selected unless it’s the only remaining model.
-
-If `selector` is empty, the model is eligible for selection. If set, the jq expression is evaluated against the request body; the model is only eligible when the result is `true`. Any other result excludes the model.
+selector 为空时会选择该模型。不为空时：根据jq表达式匹配请求体中内容，仅当结果为true时才会选择该模型。其他任何值都不会选择该模型。

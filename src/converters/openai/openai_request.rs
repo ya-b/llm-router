@@ -13,6 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIRequest {
     pub model: String,
+    #[serde(alias = "input")]
     pub messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -191,6 +192,7 @@ impl From<AnthropicRequest> for OpenAIRequest {
                             description: tool.description,
                             parameters: tool.input_schema,
                         },
+                        strict: None,
                     })
                     .collect()
             }),
