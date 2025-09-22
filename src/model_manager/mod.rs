@@ -23,6 +23,8 @@ pub struct ModelManager {
     pub(super) group_locks: HashMap<String, Mutex<()>>,
     // Runtime health/weight factors
     pub(super) health: health::Health,
+    // Hot path cache: model name -> index in config.model_list
+    pub(super) model_index: HashMap<String, usize>,
 }
 
 impl fmt::Debug for ModelManager {
@@ -109,6 +111,7 @@ impl ModelManager {
         let mut current_weights = HashMap::new();
         let mut active_requests = HashMap::new();
         let mut group_locks = HashMap::new();
+        let mut model_index = HashMap::new();
 
         // Initialize counters for all model groups
         for model_group in &config.router_settings.model_groups {
@@ -125,35 +128,23 @@ impl ModelManager {
             }
         }
         let health = health::Health::new_from_config(&config.clone());
-        Self {
-            config,
-            current_weights,
-            active_requests,
-            group_locks,
-            health: health,
+        // Build hot cache for model lookups
+        for (idx, model) in config.model_list.iter().enumerate() {
+            model_index.insert(model.model_name.clone(), idx);
         }
-    }
-
-    pub fn update_config(&mut self, new_config: Arc<Config>) {
-        // Create a new instance with the new config and reuse its fields
-        let new_manager = Self::new(new_config.clone());
-        self.config = new_config;
-        self.current_weights = new_manager.current_weights;
-        self.active_requests = new_manager.active_requests;
-        self.group_locks = new_manager.group_locks;
-        self.health = new_manager.health;
+        Self { config, current_weights, active_requests, group_locks, health: health, model_index }
     }
 
     // Helper: find a model config by exact name
     fn find_model(&self, name: &str) -> Option<&ModelConfig> {
-        self.config.model_list.iter().find(|m| m.model_name == name)
+        self
+            .model_index
+            .get(name)
+            .and_then(|&idx| self.config.model_list.get(idx))
     }
 
     pub(super) fn model_exists(&self, model_name: &str) -> bool {
-        self.config
-            .model_list
-            .iter()
-            .any(|m| m.model_name == model_name)
+        self.model_index.contains_key(model_name)
     }
 
     pub fn get_config(&self) -> &Arc<Config> {

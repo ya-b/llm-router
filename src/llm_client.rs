@@ -5,6 +5,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 use std::future::Future;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+use crate::request_id::RequestId;
 
 #[derive(Debug)]
 pub struct LlmClient {
@@ -48,6 +49,7 @@ impl LlmClient {
         &self,
         request: &RequestWrapper,
         model_config: &ModelConfig,
+        request_id: &RequestId,
     ) -> impl Future<Output = Result<reqwest::Response, reqwest::Error>> {
         // Prepare body per upstream api type to know if streaming is needed for Gemini
         let mut target_body = match model_config.llm_params.api_type {
@@ -76,6 +78,11 @@ impl LlmClient {
             .http_client
             .post(&target_url)
             .header("Content-Type", "application/json");
+
+        // Propagate request id upstream
+        if let Ok(val) = HeaderValue::from_str(&request_id.0) {
+            target_request = target_request.header("x-request-id", val);
+        }
 
         match model_config.llm_params.api_type {
             ApiType::Anthropic => {

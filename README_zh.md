@@ -23,6 +23,7 @@ Options:
   -c, --config <CONFIG>        Path to config file [default: config.yaml]
   -t, --token <TOKEN>
   -l, --log-level <LOG_LEVEL>  trace, debug, info, warn, error [default: warn]
+      --log-file <PATH>        同时将日志写入该文件（最大 10MB）
       --proxy <PROXY>          socks and http proxy, example: socks5://192.168.0.2:10080
       --check                  Check all models in config and exit
   -h, --help                   Print help

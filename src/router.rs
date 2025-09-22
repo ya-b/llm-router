@@ -10,7 +10,7 @@ use crate::converters::{
     response_handler::{handle_non_streaming_response, handle_streaming_response},
 };
 use axum::{
-    extract::State,
+    extract::{State, Extension},
     http::{StatusCode},
     response::{IntoResponse},
     Json,
@@ -18,21 +18,24 @@ use axum::{
 use axum::extract::Path;
 use serde_json::json;
 use tracing::{debug, info, warn};
+use crate::request_id::RequestId;
 
 #[axum_macros::debug_handler]
 pub async fn openai_chat(
     State(config): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
     Json(openai_request): Json<OpenAIRequest>,
 ) -> impl IntoResponse {
-    route_chat(ApiType::OpenAI, config, RequestWrapper::OpenAI(openai_request)).await
+    route_chat(ApiType::OpenAI, config, request_id, RequestWrapper::OpenAI(openai_request)).await
 }
 
 #[axum_macros::debug_handler]
 pub async fn anthropic_chat(
     State(config): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
     Json(anthropic_request): Json<AnthropicRequest>,
 ) -> impl IntoResponse {
-    route_chat(ApiType::Anthropic, config, RequestWrapper::Anthropic(anthropic_request)).await
+    route_chat(ApiType::Anthropic, config, request_id, RequestWrapper::Anthropic(anthropic_request)).await
 }
 
 // Gemini API entrypoint compatible with:
@@ -41,6 +44,7 @@ pub async fn anthropic_chat(
 #[axum_macros::debug_handler]
 pub async fn gemini_chat(
     State(config): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
     Path(path_tail): Path<String>,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -72,13 +76,14 @@ pub async fn gemini_chat(
         }
     };
 
-    route_chat(ApiType::Gemini, config, RequestWrapper::Gemini(gemini_request)).await.into_response()
+    route_chat(ApiType::Gemini, config, request_id, RequestWrapper::Gemini(gemini_request)).await.into_response()
 }
 
 
 pub async fn route_chat(
     api_type: ApiType,
     config: AppState,
+    request_id: RequestId,
     request_wrapper: RequestWrapper,
 ) -> axum::response::Response {
     
@@ -120,7 +125,7 @@ pub async fn route_chat(
 
     let response = config
         .llm_client
-        .forward_request(&request_wrapper, &selection.config);
+        .forward_request(&request_wrapper, &selection.config, &request_id);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {

@@ -5,7 +5,10 @@ mod models;
 mod model_manager;
 mod router;
 mod llm_client;
+mod request_id;
 mod utils;
+mod logging;
+mod model_checks;
 
 use axum::{
     routing::{get, post},
@@ -16,12 +19,8 @@ use config::Config;
 use router::{anthropic_chat, openai_chat, gemini_chat, list_models};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn, Level};
+use tracing::{info, Level};
 use std::str::FromStr;
-use tracing_subscriber;
-use notify::{RecursiveMode, Watcher, EventKind};
-use std::path::Path;
-use tokio::sync::mpsc;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -45,6 +44,10 @@ struct Args {
     #[arg(short, long, default_value = "warn")]
     log_level: String,
 
+    /// Also write logs to this file (max 10MB)
+    #[arg(long)]
+    log_file: Option<String>,
+
     /// socks and http proxy, example: socks5://192.168.0.2:10080
     #[arg(long)]
     proxy: Option<String>,
@@ -52,42 +55,6 @@ struct Args {
     /// Check availability of all models in config and exit
     #[arg(long)]
     check: bool,
-}
-
-async fn watch_config_file(
-    config_path: &str,
-    model_manager: &Arc<tokio::sync::RwLock<model_manager::ModelManager>>
-) -> anyhow::Result<()> {
-    let (tx, mut rx) = mpsc::channel(100);
-
-    let mut watcher = notify::recommended_watcher(move |res| {
-        if let Ok(event) = res {
-            if let Err(e) = tx.blocking_send(event) {
-                eprintln!("Failed to send event: {}", e);
-            }
-        }
-    })?;
-
-    watcher.watch(Path::new(config_path), RecursiveMode::NonRecursive)?;
-
-    while let Some(event) = rx.recv().await {
-        if let EventKind::Modify(_) = event.kind {
-            info!("Config file modified, attempting to reload");
-            match Config::from_file(config_path) {
-                Ok(new_config) => {
-                    // Update model manager with new config and reset counters
-                    let mut model_manager_write = model_manager.write().await;
-                    model_manager_write.update_config(Arc::new(new_config));
-                    info!("Configuration reloaded successfully");
-                }
-                Err(e) => {
-                    error!("Failed to reload configuration: {}", e);
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[tokio::main]
@@ -103,10 +70,8 @@ async fn main() -> anyhow::Result<()> {
         Level::INFO
     });
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .init();
+    // Initialize logging: always log to stdout, optionally also to file (capped at 10MB)
+    logging::init_logging(log_level, args.log_file.as_deref());
 
     // Load configuration
     let config_path = args.config.clone();
@@ -128,21 +93,12 @@ async fn main() -> anyhow::Result<()> {
 
     // If --check is provided, verify all models and exit
     if args.check {
-        perform_model_checks(&config, &llm_client).await?;
+        model_checks::perform_model_checks(&config, &llm_client).await?;
         return Ok(());
     }
 
     // Create model manager with RwLock for dynamic updates
     let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(config.clone())));
-
-    // Start config file watcher in a separate task
-    // let config_path_for_watcher = config_path.clone();
-    // let model_manager_for_watcher = model_manager.clone();
-    // tokio::spawn(async move {
-    //     if let Err(e) = watch_config_file(&config_path_for_watcher, &model_manager_for_watcher).await {
-    //         warn!("Config file watcher error: {}", e);
-    //     }
-    // });
 
     // Create app state with model manager and token
     let app_state = auth::AppState {
@@ -163,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
             auth::require_authorization,
         ))
         .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(request_id::inject_request_id))
         .with_state(app_state);
 
     // Start server
@@ -170,110 +127,46 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     info!("Server started on http://{}", bind_address);
 
-    axum::serve(listener, app).await?;
+    // Graceful shutdown: stop accepting new connections on Ctrl+C/SIGTERM
+    // and wait for in-flight requests to complete.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 
-async fn perform_model_checks(
-    config: &Arc<Config>,
-    llm_client: &Arc<llm_client::LlmClient>,
-) -> anyhow::Result<()> {
-    use crate::config::ApiType;
-    use crate::converters::request_wrapper::RequestWrapper;
-    use crate::converters::openai::{OpenAIRequest, OpenAIMessage, OpenAIContent};
-    use crate::converters::anthropic::{AnthropicRequest, AnthropicMessage, AnthropicContent};
-    use crate::converters::gemini::{GeminiRequest, gemini_content::GeminiContent, gemini_part::GeminiPart, gemini_generation_config::GeminiGenerationConfig};
-    use futures::stream::{self, StreamExt};
-
-    println!("Checking models ({} total):", config.model_list.len());
-    let concurrency: usize = 20;
-    let client = llm_client.clone();
-    let tasks = stream::iter(config.model_list.iter().cloned()).map(|mc| {
-        let client = client.clone();
-        async move {
-            let request = match mc.llm_params.api_type {
-                ApiType::OpenAI => {
-                    let req = OpenAIRequest {
-                        model: mc.model_name.clone(),
-                        messages: vec![OpenAIMessage {
-                            role: "user".to_string(),
-                            content: OpenAIContent::Text("ping".to_string()),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        }],
-                        max_tokens: Some(1),
-                        temperature: Some(0.0),
-                        response_format: None,
-                        tools: None,
-                        stream: Some(false),
-                        extra_fields: std::collections::HashMap::new(),
-                    };
-                    RequestWrapper::OpenAI(req)
-                }
-                ApiType::Anthropic => {
-                    let req = AnthropicRequest {
-                        model: mc.model_name.clone(),
-                        max_tokens: 1,
-                        messages: Some(vec![AnthropicMessage { role: "user".to_string(), content: AnthropicContent::Text("ping".to_string()) }]),
-                        system: None,
-                        tools: None,
-                        metadata: None,
-                        stream: Some(false),
-                        temperature: Some(0.0),
-                        extra_fields: std::collections::HashMap::new(),
-                    };
-                    RequestWrapper::Anthropic(req)
-                }
-                ApiType::Gemini => {
-                    let req = GeminiRequest {
-                        model: mc.model_name.clone(),
-                        contents: vec![GeminiContent { role: Some("user".to_string()), parts: vec![GeminiPart::Text { text: "ping".to_string(), thought: None, thought_signature: None }] }],
-                        system_instruction: None,
-                        tools: None,
-                        generation_config: Some(GeminiGenerationConfig { response_mime_type: None, response_schema: None, temperature: Some(0.0), max_output_tokens: Some(1), ..Default::default() }),
-                        stream: Some(false),
-                        extra_fields: std::collections::HashMap::new(),
-                    };
-                    RequestWrapper::Gemini(req)
-                }
-            };
-
-            let result = client.forward_request(&request, &mc).await;
-            match result {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        println!(
-                            "[OK] {} -> {} ({})",
-                            mc.model_name,
-                            mc.llm_params.model,
-                            match mc.llm_params.api_type { ApiType::OpenAI => "openai", ApiType::Anthropic => "anthropic", ApiType::Gemini => "gemini" }
-                        );
-                    } else {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-                        println!(
-                            "[FAIL] {} -> {} (status: {})\n  {}",
-                            mc.model_name, mc.llm_params.model, status, truncate(&body, 500)
-                        );
-                    }
-                }
-                Err(e) => {
-                    println!(
-                        "[ERROR] {} -> {}: {}",
-                        mc.model_name, mc.llm_params.model, e
-                    );
-                }
-            }
+// Waits for Ctrl+C (all platforms) or SIGTERM (unix) and returns.
+async fn shutdown_signal() {
+    // Listen for Ctrl+C
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to listen for Ctrl+C: {}", e);
         }
-    })
-    .buffer_unordered(concurrency)
-    .collect::<Vec<()>>();
+    };
 
-    tasks.await;
-    Ok(())
+    // Also listen for SIGTERM on Unix
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => tracing::error!("Failed to install SIGTERM handler: {}", e),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tracing::info!("Shutdown signal handler armed. Press Ctrl+C to stop.");
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Ctrl+C received. Starting graceful shutdown...");
+        }
+        _ = term => {
+            tracing::info!("SIGTERM received. Starting graceful shutdown...");
+        }
+    }
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len { s.to_string() } else { format!("{}…", &s[..max_len]) }
-}
+// (moved perform_model_checks and logging helpers to separate modules)

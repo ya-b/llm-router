@@ -110,16 +110,21 @@ impl From<OpenAIRequest> for GeminiRequest {
                 function_declarations: ts
                     .into_iter()
                     .map(|t| {
-                        let f = t.function;
-                        // Keep only allowed keys in parameters if it's an object
-                        let mut params = f.parameters.clone();
-                        if let Value::Object(ref mut map) = params {
-                            map.retain(|k, _| k.eq("type") || k.eq("properties") || k.eq("required"));
-                        }
+                        let function = t.function;
+                        // Clean the parameters schema to remove unsupported fields
+                        let mut params_value = function.parameters;
+                        let parameters = if params_value.is_null() {
+                            None
+                        } else {
+                            clean_json_schema_for_gemini(&mut params_value);
+                            Some(params_value)
+                        };
+                        let name = function.name;
+                        let description = Some(function.description);
                         GeminiFunctionDeclaration {
-                            name: f.name,
-                            description: Some(f.description),
-                            parameters: Some(params),
+                            name,
+                            description,
+                            parameters,
                         }
                     })
                     .collect(),
@@ -163,6 +168,28 @@ impl From<OpenAIRequest> for GeminiRequest {
             stream: openai.stream,
             extra_fields: openai.extra_fields,
         }
+    }
+}
+
+
+fn clean_json_schema_for_gemini(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("additionalProperties");
+            
+            // Recursively clean nested objects
+            for value in map.values_mut() {
+                clean_json_schema_for_gemini(value);
+            }
+        }
+        Value::Array(arr) => {
+            // Recursively clean items in arrays
+            for item in arr.iter_mut() {
+                clean_json_schema_for_gemini(item);
+            }
+        }
+        _ => {}
     }
 }
 
