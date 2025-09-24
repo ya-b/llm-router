@@ -1,7 +1,7 @@
 pub mod openai_choice;
+pub mod openai_completion_tokens_details;
 pub mod openai_content;
 pub mod openai_content_item;
-pub mod openai_completion_tokens_details;
 pub mod openai_function;
 pub mod openai_image_url;
 pub mod openai_message;

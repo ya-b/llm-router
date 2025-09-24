@@ -5,7 +5,11 @@ use super::ModelManager;
 use super::types::ModelKey;
 
 impl ModelManager {
-    pub fn select_round_robin(&self, group_name: &str, models: &[crate::config::ModelGroupEntry]) -> String {
+    pub fn select_round_robin(
+        &self,
+        group_name: &str,
+        models: &[crate::config::ModelGroupEntry],
+    ) -> String {
         let base_models: Vec<&crate::config::ModelGroupEntry> = models
             .iter()
             .filter(|model| self.model_exists(&model.name))
@@ -17,7 +21,9 @@ impl ModelManager {
             .copied()
             .filter(|m| self.health.permit(group_name, m))
             .collect();
-        if valid_models.is_empty() { valid_models = base_models; }
+        if valid_models.is_empty() {
+            valid_models = base_models;
+        }
 
         if valid_models.is_empty() {
             return self.config.model_list.get(0).map_or_else(
@@ -30,10 +36,7 @@ impl ModelManager {
         }
 
         // Guard the whole SWRR step for this group to ensure atomicity
-        let _guard = self
-            .group_locks
-            .get(group_name)
-            .map(|m| m.lock().unwrap());
+        let _guard = self.group_locks.get(group_name).map(|m| m.lock().unwrap());
 
         // Sum of effective weights (as isize)
         let total_weight: isize = valid_models
@@ -89,17 +92,21 @@ impl ModelManager {
         };
 
         // 3) Subtract total weight from the selected model's current weight
-        if let Some(curr) = self
-            .current_weights
-            .get(&ModelKey::new(group_name.to_string(), selected_model.name.clone()))
-        {
+        if let Some(curr) = self.current_weights.get(&ModelKey::new(
+            group_name.to_string(),
+            selected_model.name.clone(),
+        )) {
             curr.fetch_sub(total_weight, std::sync::atomic::Ordering::SeqCst);
         }
 
         selected_model.name.clone()
     }
 
-    pub fn select_least_conn(&self, group_name: &str, models: &[crate::config::ModelGroupEntry]) -> String {
+    pub fn select_least_conn(
+        &self,
+        group_name: &str,
+        models: &[crate::config::ModelGroupEntry],
+    ) -> String {
         let mut min_score = f64::MAX;
         let mut best_models: Vec<&crate::config::ModelGroupEntry> = Vec::new();
 
@@ -113,12 +120,17 @@ impl ModelManager {
             .copied()
             .filter(|m| self.health.permit(group_name, m))
             .collect();
-        if valid_models.is_empty() { valid_models = base_models; }
+        if valid_models.is_empty() {
+            valid_models = base_models;
+        }
 
         if valid_models.is_empty() {
             return self.config.model_list.get(0).map_or_else(
                 || {
-                    warn!("No valid models in group {} and model_list is empty.", group_name);
+                    warn!(
+                        "No valid models in group {} and model_list is empty.",
+                        group_name
+                    );
                     String::new()
                 },
                 |m| m.model_name.clone(),
@@ -133,17 +145,19 @@ impl ModelManager {
                 .get(&key)
                 .map(|count| count.load(std::sync::atomic::Ordering::SeqCst) as f64)
                 .unwrap_or(0.0);
-            
+
             let current_weight = self.health.effective_weight(group_name, model_entry) as f64;
-            
+
             let score = if current_weight > 0.0 {
                 active_requests / current_weight
             } else {
                 f64::MAX
             };
-            
-            debug!("Model {} in group {}: active_requests={}, current_weight={}, score={}",
-                   model_entry.name, group_name, active_requests, current_weight, score);
+
+            debug!(
+                "Model {} in group {}: active_requests={}, current_weight={}, score={}",
+                model_entry.name, group_name, active_requests, current_weight, score
+            );
 
             if score < min_score {
                 min_score = score;
@@ -155,18 +169,27 @@ impl ModelManager {
         }
 
         if best_models.is_empty() {
-            warn!("No suitable model found in group {}, falling back to first valid model in group.", group_name);
+            warn!(
+                "No suitable model found in group {}, falling back to first valid model in group.",
+                group_name
+            );
             return valid_models.first().map_or_else(
-                || self.config.model_list.get(0).map_or_else(|| String::new(), |m| m.model_name.clone()),
-                |m| m.name.clone()
+                || {
+                    self.config
+                        .model_list
+                        .get(0)
+                        .map_or_else(|| String::new(), |m| m.model_name.clone())
+                },
+                |m| m.name.clone(),
             );
         }
 
         if best_models.len() == 1 {
             return best_models[0].name.clone();
         }
-        
-        let best_models_owned: Vec<crate::config::ModelGroupEntry> = best_models.into_iter().cloned().collect();
+
+        let best_models_owned: Vec<crate::config::ModelGroupEntry> =
+            best_models.into_iter().cloned().collect();
 
         debug!("Multiple models with best score, using weighted random selection.");
         self.select_random_with_group(group_name, &best_models_owned)
@@ -188,10 +211,7 @@ impl ModelManager {
             );
         }
 
-        let total_weight: u32 = valid_models
-            .iter()
-            .map(|m| m.weight)
-            .sum();
+        let total_weight: u32 = valid_models.iter().map(|m| m.weight).sum();
         if total_weight == 0 {
             // If all weights are 0, select one randomly (unweighted)
             let mut rng = rand::thread_rng();
@@ -212,12 +232,21 @@ impl ModelManager {
 
         // Fallback in case of rounding errors or other unexpected issues.
         valid_models.last().map_or_else(
-            || self.config.model_list.get(0).map_or_else(|| String::new(), |m| m.model_name.clone()),
-            |m| m.name.clone()
+            || {
+                self.config
+                    .model_list
+                    .get(0)
+                    .map_or_else(|| String::new(), |m| m.model_name.clone())
+            },
+            |m| m.name.clone(),
         )
     }
 
-    pub fn select_random_with_group(&self, group_name: &str, models: &[crate::config::ModelGroupEntry]) -> String {
+    pub fn select_random_with_group(
+        &self,
+        group_name: &str,
+        models: &[crate::config::ModelGroupEntry],
+    ) -> String {
         let base_models: Vec<_> = models
             .iter()
             .filter(|model| self.model_exists(&model.name))
@@ -238,7 +267,9 @@ impl ModelManager {
             .copied()
             .filter(|m| self.health.permit(group_name, m))
             .collect();
-        if valid_models.is_empty() { valid_models = base_models; }
+        if valid_models.is_empty() {
+            valid_models = base_models;
+        }
 
         let total_weight: u32 = valid_models
             .iter()
@@ -263,8 +294,13 @@ impl ModelManager {
         }
 
         valid_models.last().map_or_else(
-            || self.config.model_list.get(0).map_or_else(|| String::new(), |m| m.model_name.clone()),
-            |m| m.name.clone()
+            || {
+                self.config
+                    .model_list
+                    .get(0)
+                    .map_or_else(|| String::new(), |m| m.model_name.clone())
+            },
+            |m| m.name.clone(),
         )
     }
 }

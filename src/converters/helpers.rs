@@ -1,5 +1,4 @@
-use serde_json::{json, Value};
-
+use serde_json::{Value, json};
 
 // 停止原因映射
 pub fn map_openai_finish_reason_to_anthropic(finish_reason: &Value) -> Value {
@@ -8,7 +7,7 @@ pub fn map_openai_finish_reason_to_anthropic(finish_reason: &Value) -> Value {
         Some("length") => json!("max_tokens"),
         Some("tool_calls") => json!("tool_use"),
         Some("content_filter") => json!("stop_sequence"),
-        _ => json!("end_turn")
+        _ => json!("end_turn"),
     }
 }
 
@@ -18,6 +17,6 @@ pub fn map_anthropic_stop_reason_to_openai(stop_reason: Option<&Value>) -> Value
         Some("max_tokens") => json!("length"),
         Some("tool_use") => json!("tool_calls"),
         Some("stop_sequence") => json!("stop"),
-        _ => json!("stop")
+        _ => json!("stop"),
     }
 }

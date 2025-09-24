@@ -1,12 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::converters::gemini::gemini_funtion_call::GeminiFunctionCall;
 use crate::converters::gemini::{GeminiCandidate, GeminiFinishReason, GeminiUsage};
 use crate::converters::gemini::{GeminiContent, GeminiPart};
-use crate::converters::gemini::gemini_funtion_call::GeminiFunctionCall;
-use crate::converters::openai::{
-    OpenAIStreamChunk, OpenAIStreamChoice,
-};
-
+use crate::converters::openai::{OpenAIStreamChoice, OpenAIStreamChunk};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiStreamChunk {
@@ -112,7 +109,6 @@ fn map_openai_finish_reason(r: String) -> Option<GeminiFinishReason> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,14 +117,11 @@ mod tests {
     fn test_parse_json_str() {
         let text = "{\"candidates\": [{\"content\": {\"parts\": [{\"functionCall\": {\"name\": \"schedule_meeting\",\"args\": {\"attendees\": [\"Bob\",\"Alice\"],\"date\": \"2025-03-27\",\"topic\": \"Q3 planning\",\"time\": \"10:00\"}},\"thoughtSignature\": \"thoughtSignature value\"}],\"role\": \"model\"},\"finishReason\": \"STOP\",\"index\": 0}],\"usageMetadata\": {\"promptTokenCount\": 165,\"candidatesTokenCount\": 49,\"totalTokenCount\": 562,\"promptTokensDetails\": [{\"modality\": \"TEXT\",\"tokenCount\": 165}],\"thoughtsTokenCount\": 348},\"modelVersion\": \"gemini-2.5-pro\",\"responseId\": \"iJDOaOzkBM70jMcPxJmmyAw\"}";
         let info = match serde_json::from_str::<GeminiStreamChunk>(&text) {
-            Ok(chunk) => {
-                "success".to_string()
-            },
+            Ok(chunk) => "success".to_string(),
             Err(e) => {
                 format!("{:?}", e)
             }
         };
         assert_eq!(info, "success");
     }
-
 }

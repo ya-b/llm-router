@@ -1,10 +1,10 @@
 use crate::converters::anthropic::{
     AnthropicContentBlock, AnthropicStreamChunk, AnthropicStreamDelta,
 };
-use crate::converters::helpers;
 use crate::converters::gemini::{
-    GeminiCandidate, GeminiFinishReason, GeminiPart, GeminiStreamChunk
+    GeminiCandidate, GeminiFinishReason, GeminiPart, GeminiStreamChunk,
 };
+use crate::converters::helpers;
 use crate::converters::openai::{
     OpenAIStreamChoice, OpenAIStreamDelta, OpenAIStreamToolCall, OpenAIStreamToolCallFunction,
     OpenAIUsage,
@@ -34,17 +34,17 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
             AnthropicStreamChunk::MessageStop => "chatcmpl-default".to_string(),
             AnthropicStreamChunk::Ping => "chatcmpl-default".to_string(),
         };
-        
+
         let mut delta = OpenAIStreamDelta {
             role: None,
             content: None,
             reasoning_content: None,
             tool_calls: None,
         };
-        
+
         let mut finish_reason = None;
         let mut usage = None;
-        
+
         // 根据 chunk 类型处理
         match anthropic_chunk {
             AnthropicStreamChunk::MessageStart { message: _ } => {
@@ -53,7 +53,10 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
                 delta.content = Some("".to_string());
                 delta.reasoning_content = Some("".to_string());
             }
-            AnthropicStreamChunk::ContentBlockStart { index: _, content_block } => {
+            AnthropicStreamChunk::ContentBlockStart {
+                index: _,
+                content_block,
+            } => {
                 // 内容块开始
                 match content_block {
                     AnthropicContentBlock::Text { text: _ } => {
@@ -78,7 +81,10 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
                     }
                 }
             }
-            AnthropicStreamChunk::ContentBlockDelta { index: _, delta: chunk_delta } => {
+            AnthropicStreamChunk::ContentBlockDelta {
+                index: _,
+                delta: chunk_delta,
+            } => {
                 // 处理内容块增量
                 match chunk_delta {
                     AnthropicStreamDelta::ThinkingDelta { thinking } => {
@@ -87,7 +93,11 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
                     AnthropicStreamDelta::TextDelta { text } => {
                         delta.content = Some(text);
                     }
-                    AnthropicStreamDelta::InputJsonDelta { partial_json, name, id } => {
+                    AnthropicStreamDelta::InputJsonDelta {
+                        partial_json,
+                        name,
+                        id,
+                    } => {
                         // 工具参数增量
                         delta.tool_calls = Some(vec![OpenAIStreamToolCall {
                             index: 0,
@@ -110,12 +120,20 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
                     tool_calls: None,
                 };
             }
-            AnthropicStreamChunk::MessageDelta { delta: chunk_delta, usage: chunk_usage } => {
+            AnthropicStreamChunk::MessageDelta {
+                delta: chunk_delta,
+                usage: chunk_usage,
+            } => {
                 // 处理消息级增量，主要是停止原因
                 if let Some(stop_reason) = chunk_delta.stop_reason {
-                    finish_reason = Some(helpers::map_anthropic_stop_reason_to_openai(
-                        Some(&Value::String(stop_reason))
-                    ).as_str().unwrap_or("stop").to_string());
+                    finish_reason = Some(
+                        helpers::map_anthropic_stop_reason_to_openai(Some(&Value::String(
+                            stop_reason,
+                        )))
+                        .as_str()
+                        .unwrap_or("stop")
+                        .to_string(),
+                    );
                 }
                 usage = chunk_usage.map(|u| OpenAIUsage {
                     prompt_tokens: u.input_tokens,
@@ -145,7 +163,7 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
                 };
             }
         }
-        
+
         // 构建 OpenAI 流式响应块
         OpenAIStreamChunk {
             id,
@@ -167,8 +185,8 @@ impl From<AnthropicStreamChunk> for OpenAIStreamChunk {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_anthropic_to_openai_stream_chunk_message_start() {
@@ -184,10 +202,11 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"]["role"], "assistant");
         assert_eq!(openai_chunk["choices"][0]["delta"]["content"], "");
@@ -209,10 +228,11 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"]["content"], "");
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
@@ -232,16 +252,32 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["id"], "tool_123");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["type"], "function");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "get_weather");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "");
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "tool_123"
+        );
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["type"],
+            "function"
+        );
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "get_weather"
+        );
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            ""
+        );
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
     }
 
@@ -257,12 +293,16 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["reasoning_content"], "I need to think about this step by step.");
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["reasoning_content"],
+            "I need to think about this step by step."
+        );
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
     }
 
@@ -278,12 +318,16 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["content"], "Hello, how can I help you today?");
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["content"],
+            "Hello, how can I help you today?"
+        );
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
     }
 
@@ -299,13 +343,20 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
-        assert_eq!(openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"location\": \"San Francisco, CA\"}");
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            openai_chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"location\": \"San Francisco, CA\"}"
+        );
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
     }
 
@@ -317,10 +368,11 @@ mod tests {
             "index": 0
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
@@ -336,10 +388,11 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], "stop");
@@ -352,10 +405,11 @@ mod tests {
             "type": "message_stop"
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], "stop");
@@ -368,10 +422,11 @@ mod tests {
             "type": "ping"
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], Value::Null);
@@ -387,10 +442,11 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], "length");
@@ -406,10 +462,11 @@ mod tests {
             }
         });
 
-        let anthropic_chunk: AnthropicStreamChunk = serde_json::from_value(json_chunk.clone()).unwrap();
+        let anthropic_chunk: AnthropicStreamChunk =
+            serde_json::from_value(json_chunk.clone()).unwrap();
         let openai_chunk_struct: OpenAIStreamChunk = anthropic_chunk.into();
         let openai_chunk = serde_json::to_value(openai_chunk_struct.clone()).unwrap_or_default();
-        
+
         assert_eq!(openai_chunk["object"], "chat.completion.chunk");
         assert_eq!(openai_chunk["choices"][0]["delta"], json!({}));
         assert_eq!(openai_chunk["choices"][0]["finish_reason"], "tool_calls");
@@ -471,7 +528,11 @@ fn map_gemini_candidate_to_openai_choice(
 
     if let Some(r) = candidate.content.role {
         // Gemini uses "model" for assistant
-        role = Some(if r == "model" { "assistant".to_string() } else { r });
+        role = Some(if r == "model" {
+            "assistant".to_string()
+        } else {
+            r
+        });
     }
 
     for part in candidate.content.parts.into_iter() {
@@ -507,13 +568,21 @@ fn map_gemini_candidate_to_openai_choice(
 
     let delta = OpenAIStreamDelta {
         role,
-        content: if content_acc.is_empty() { None } else { Some(content_acc) },
+        content: if content_acc.is_empty() {
+            None
+        } else {
+            Some(content_acc)
+        },
         reasoning_content: if reasoning_acc.is_empty() {
             None
         } else {
             Some(reasoning_acc)
         },
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     };
 
     let finish_reason = candidate

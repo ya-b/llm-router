@@ -1,24 +1,25 @@
 use crate::auth::AppState;
-use crate::model_manager::Selection;
 use crate::config::ApiType;
-use crate::models::{ErrorResponse, ErrorDetail, ModelsResponse, ModelInfo};
 use crate::converters::{
-    openai::{OpenAIRequest},
-    anthropic::{AnthropicRequest},
+    anthropic::AnthropicRequest,
     gemini::GeminiRequest,
+    openai::OpenAIRequest,
     request_wrapper::RequestWrapper,
     response_handler::{handle_non_streaming_response, handle_streaming_response},
+    responses::ResponsesRequest,
 };
-use axum::{
-    extract::{State, Extension},
-    http::{StatusCode},
-    response::{IntoResponse},
-    Json,
-};
+use crate::model_manager::Selection;
+use crate::models::{ErrorDetail, ErrorResponse, ModelInfo, ModelsResponse};
+use crate::request_id::RequestId;
 use axum::extract::Path;
+use axum::{
+    Json,
+    extract::{Extension, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use serde_json::json;
 use tracing::{debug, info, warn};
-use crate::request_id::RequestId;
 
 #[axum_macros::debug_handler]
 pub async fn openai_chat(
@@ -26,7 +27,13 @@ pub async fn openai_chat(
     Extension(request_id): Extension<RequestId>,
     Json(openai_request): Json<OpenAIRequest>,
 ) -> impl IntoResponse {
-    route_chat(ApiType::OpenAI, config, request_id, RequestWrapper::OpenAI(openai_request)).await
+    route_chat(
+        ApiType::OpenAI,
+        config,
+        request_id,
+        RequestWrapper::OpenAI(openai_request),
+    )
+    .await
 }
 
 #[axum_macros::debug_handler]
@@ -35,7 +42,28 @@ pub async fn anthropic_chat(
     Extension(request_id): Extension<RequestId>,
     Json(anthropic_request): Json<AnthropicRequest>,
 ) -> impl IntoResponse {
-    route_chat(ApiType::Anthropic, config, request_id, RequestWrapper::Anthropic(anthropic_request)).await
+    route_chat(
+        ApiType::Anthropic,
+        config,
+        request_id,
+        RequestWrapper::Anthropic(anthropic_request),
+    )
+    .await
+}
+
+#[axum_macros::debug_handler]
+pub async fn responses_chat(
+    State(config): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(responses_request): Json<ResponsesRequest>,
+) -> impl IntoResponse {
+    route_chat(
+        ApiType::Responses,
+        config,
+        request_id,
+        RequestWrapper::Responses(responses_request),
+    )
+    .await
 }
 
 // Gemini API entrypoint compatible with:
@@ -76,9 +104,15 @@ pub async fn gemini_chat(
         }
     };
 
-    route_chat(ApiType::Gemini, config, request_id, RequestWrapper::Gemini(gemini_request)).await.into_response()
+    route_chat(
+        ApiType::Gemini,
+        config,
+        request_id,
+        RequestWrapper::Gemini(gemini_request),
+    )
+    .await
+    .into_response()
 }
-
 
 pub async fn route_chat(
     api_type: ApiType,
@@ -86,13 +120,15 @@ pub async fn route_chat(
     request_id: RequestId,
     request_wrapper: RequestWrapper,
 ) -> axum::response::Response {
-    
     // Parse the request into the appropriate structure based on API type
     let model = request_wrapper.get_model();
-    
+
     let stream = request_wrapper.is_stream().unwrap_or(false);
-    
-    debug!("raw request: {}", serde_json::to_string(&request_wrapper).expect("Failed to serialize request"));
+
+    debug!(
+        "raw request: {}",
+        serde_json::to_string(&request_wrapper).expect("Failed to serialize request")
+    );
 
     // Narrow read-lock scope to selection only
     let selection: Selection = {
@@ -123,9 +159,10 @@ pub async fn route_chat(
         model_manager.start(&selection);
     }
 
-    let response = config
-        .llm_client
-        .forward_request(&request_wrapper, &selection.config, &request_id);
+    let response =
+        config
+            .llm_client
+            .forward_request(&request_wrapper, &selection.config, &request_id);
     let response = match response.await {
         Ok(resp) => resp,
         Err(e) => {
@@ -158,7 +195,9 @@ pub async fn route_chat(
         }
 
         let mut resp = (status, body_bytes).into_response();
-        if let Some(ct) = content_type { resp.headers_mut().insert(CONTENT_TYPE, ct); }
+        if let Some(ct) = content_type {
+            resp.headers_mut().insert(CONTENT_TYPE, ct);
+        }
         return resp;
     }
     // Handle streaming and non-streaming responses
@@ -169,7 +208,8 @@ pub async fn route_chat(
             model.to_string(),
             selection.config.llm_params.api_type.clone(),
             api_type.clone(),
-        ).await;
+        )
+        .await;
         // Track the successful completion of streaming request
         {
             let model_manager = config.model_manager.read().await;
@@ -183,7 +223,8 @@ pub async fn route_chat(
             model.to_string(),
             selection.config.llm_params.api_type.clone(),
             api_type.clone(),
-        ).await;
+        )
+        .await;
         // Track the successful completion of non-streaming request
         {
             let model_manager = config.model_manager.read().await;
@@ -193,34 +234,31 @@ pub async fn route_chat(
     }
 }
 
-
 #[axum_macros::debug_handler]
-pub async fn list_models(
-    State(config): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_models(State(config): State<AppState>) -> impl IntoResponse {
     debug!("Received models list request");
-    
+
     let model_groups = {
         let model_manager = config.model_manager.read().await;
         let cfg = model_manager.get_config();
         cfg.router_settings.model_groups.clone()
     };
-    
+
     let mut models = Vec::new();
-    
+
     // Add all model group aliases
     for model_group in &model_groups {
         models.push(ModelInfo {
             id: model_group.name.clone(),
-            object: "model".to_string()
+            object: "model".to_string(),
         });
     }
-    
+
     let response = ModelsResponse {
         object: "list".to_string(),
         data: models,
     };
-    
+
     debug!("Returning {} models", response.data.len());
     Json(response).into_response()
 }

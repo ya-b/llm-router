@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::gemini::GeminiInlineData;
 use crate::converters::gemini::gemini_funtion_call::GeminiFunctionCall;
 use crate::converters::gemini::gemini_funtion_response::GeminiFunctionResponse;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

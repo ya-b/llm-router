@@ -1,6 +1,6 @@
+use crate::converters::gemini::GeminiThinkingConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::converters::gemini::GeminiThinkingConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GeminiGenerationConfig {

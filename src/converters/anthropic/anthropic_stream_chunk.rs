@@ -1,10 +1,14 @@
 use crate::converters::helpers;
 use crate::converters::{
     anthropic::{
-        AnthropicContentBlock, AnthropicMessageDelta, AnthropicStreamDelta, AnthropicStreamMessage,
-        AnthropicUsage,
+        AnthropicContent, AnthropicContentBlock, AnthropicContentObject, AnthropicMessageDelta,
+        AnthropicStreamDelta, AnthropicStreamMessage, AnthropicUsage,
     },
     openai::OpenAIStreamChunk,
+    responses::{
+        ResponsesContentPart, ResponsesOutputItem, ResponsesReasoningSummary, ResponsesResponse,
+        ResponsesStreamChunk, ResponsesStreamEventPayload, ResponsesUsage,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,7 +42,6 @@ pub enum AnthropicStreamChunk {
 }
 
 impl AnthropicStreamChunk {
-
     pub fn stream_type(&self) -> &'static str {
         match self {
             AnthropicStreamChunk::MessageStart { .. } => "message_start",
@@ -49,6 +52,221 @@ impl AnthropicStreamChunk {
             AnthropicStreamChunk::MessageStop => "message_stop",
             AnthropicStreamChunk::Ping => "ping",
         }
+    }
+}
+
+impl From<ResponsesStreamChunk> for AnthropicStreamChunk {
+    fn from(chunk: ResponsesStreamChunk) -> Self {
+        match (chunk.event_type.as_str(), chunk.payload) {
+            ("response.created", ResponsesStreamEventPayload::Response { response })
+            | ("response.in_progress", ResponsesStreamEventPayload::Response { response }) => {
+                AnthropicStreamChunk::MessageStart {
+                    message: responses_response_to_anthropic_message(response),
+                }
+            }
+            (
+                "response.content_part.added",
+                ResponsesStreamEventPayload::ContentPart {
+                    content_index,
+                    part,
+                    ..
+                },
+            ) => {
+                if let Some(block) = responses_part_to_content_block(part) {
+                    AnthropicStreamChunk::ContentBlockStart {
+                        index: content_index as i32,
+                        content_block: block,
+                    }
+                } else {
+                    AnthropicStreamChunk::Ping
+                }
+            }
+            (
+                "response.output_text.delta",
+                ResponsesStreamEventPayload::OutputTextDelta {
+                    content_index,
+                    delta,
+                    ..
+                },
+            ) => AnthropicStreamChunk::ContentBlockDelta {
+                index: content_index as i32,
+                delta: AnthropicStreamDelta::TextDelta { text: delta },
+            },
+            (
+                "response.output_text.done",
+                ResponsesStreamEventPayload::OutputTextDone { content_index, .. },
+            )
+            | (
+                "response.content_part.done",
+                ResponsesStreamEventPayload::ContentPartDone { content_index, .. },
+            ) => AnthropicStreamChunk::ContentBlockStop {
+                index: content_index as i32,
+            },
+            (
+                "response.output_item.done",
+                ResponsesStreamEventPayload::OutputItemDone { item, .. },
+            ) => AnthropicStreamChunk::MessageDelta {
+                delta: AnthropicMessageDelta {
+                    stop_reason: extract_stop_reason_from_output_item(&item),
+                },
+                usage: None,
+            },
+            ("response.completed", ResponsesStreamEventPayload::Response { .. }) => {
+                AnthropicStreamChunk::MessageStop
+            }
+            _ => AnthropicStreamChunk::Ping,
+        }
+    }
+}
+
+fn responses_response_to_anthropic_message(response: ResponsesResponse) -> AnthropicStreamMessage {
+    let usage = response
+        .usage
+        .clone()
+        .map(responses_usage_to_anthropic_usage);
+    AnthropicStreamMessage {
+        id: response.id,
+        r#type: response.object.unwrap_or_else(|| "message".to_string()),
+        role: "assistant".to_string(),
+        content: responses_output_to_anthropic_content(response.output),
+        model: response.model,
+        stop_reason: None,
+        usage,
+    }
+}
+
+fn responses_output_to_anthropic_content(
+    output: Vec<ResponsesOutputItem>,
+) -> Vec<AnthropicContent> {
+    let mut content = Vec::new();
+    for item in output {
+        match item {
+            ResponsesOutputItem::Message { content: parts, .. } => {
+                let mut converted = Vec::new();
+                for part in parts {
+                    if let Some(obj) = responses_part_to_content_object(part) {
+                        converted.push(obj);
+                    }
+                }
+                if !converted.is_empty() {
+                    content.push(AnthropicContent::Array(converted));
+                }
+            }
+            ResponsesOutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                let input = serde_json::from_str(&arguments).unwrap_or(Value::Null);
+                content.push(AnthropicContent::Array(vec![
+                    AnthropicContentObject::ToolUse { id, name, input },
+                ]));
+                content.push(AnthropicContent::Array(vec![
+                    AnthropicContentObject::ToolResult {
+                        tool_use_id: call_id,
+                        content: String::new(),
+                    },
+                ]));
+            }
+            _ => {}
+        }
+    }
+    content
+}
+
+fn responses_part_to_content_block(part: ResponsesContentPart) -> Option<AnthropicContentBlock> {
+    match part {
+        ResponsesContentPart::OutputText { text, .. } => Some(AnthropicContentBlock::Text { text }),
+        ResponsesContentPart::Reasoning { summary, .. } => summary
+            .into_iter()
+            .find_map(|entry| match entry {
+                ResponsesReasoningSummary::SummaryText { text, .. } => Some(text),
+                ResponsesReasoningSummary::Unknown => None,
+            })
+            .map(|thinking| AnthropicContentBlock::Thinking {
+                thinking,
+                signature: String::new(),
+            }),
+        ResponsesContentPart::FunctionCall {
+            id,
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
+            let input = serde_json::from_str(&arguments).unwrap_or(Value::Null);
+            Some(AnthropicContentBlock::ToolUse {
+                id: id.unwrap_or(call_id),
+                name,
+                input,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn responses_part_to_content_object(part: ResponsesContentPart) -> Option<AnthropicContentObject> {
+    match part {
+        ResponsesContentPart::OutputText { text, .. } => {
+            Some(AnthropicContentObject::Text { text })
+        }
+        ResponsesContentPart::Reasoning { summary, .. } => summary
+            .into_iter()
+            .find_map(|entry| match entry {
+                ResponsesReasoningSummary::SummaryText { text, .. } => Some(text),
+                ResponsesReasoningSummary::Unknown => None,
+            })
+            .map(|thinking| AnthropicContentObject::Thinking {
+                thinking,
+                signature: None,
+            }),
+        ResponsesContentPart::FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
+            let input = serde_json::from_str(&arguments).unwrap_or(Value::Null);
+            Some(AnthropicContentObject::ToolUse {
+                id: call_id,
+                name,
+                input,
+            })
+        }
+        ResponsesContentPart::FunctionCallOutput {
+            call_id, output, ..
+        } => Some(AnthropicContentObject::ToolResult {
+            tool_use_id: call_id,
+            content: output,
+        }),
+        _ => None,
+    }
+}
+
+fn responses_usage_to_anthropic_usage(usage: ResponsesUsage) -> AnthropicUsage {
+    AnthropicUsage {
+        input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
+        output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
+    }
+}
+
+fn extract_stop_reason_from_output_item(item: &ResponsesOutputItem) -> Option<String> {
+    match item {
+        ResponsesOutputItem::Message { status, .. } => map_status_to_stop_reason(status),
+        _ => None,
+    }
+}
+
+fn map_status_to_stop_reason(status: &str) -> Option<String> {
+    match status {
+        "completed" => Some("end_turn".to_string()),
+        "requires_action" => Some("tool_use".to_string()),
+        "incomplete" => Some("max_tokens".to_string()),
+        "cancelled" => Some("abort".to_string()),
+        "failed" => Some("error".to_string()),
+        _ => None,
     }
 }
 
@@ -64,11 +282,7 @@ impl From<OpenAIStreamChunk> for AnthropicStreamChunk {
             return AnthropicStreamChunk::Ping;
         }
 
-        let first_choice = match openai_chunk
-            .choices
-            .as_ref()
-            .and_then(|v| v.first())
-        {
+        let first_choice = match openai_chunk.choices.as_ref().and_then(|v| v.first()) {
             Some(c) => c,
             None => return AnthropicStreamChunk::Ping,
         };
@@ -83,10 +297,7 @@ impl From<OpenAIStreamChunk> for AnthropicStreamChunk {
         let delta = &first_choice.delta;
 
         // 处理推理内容
-        if let Some(reasoning_content) = delta
-            .as_ref()
-            .and_then(|d| d.reasoning_content.as_ref())
-        {
+        if let Some(reasoning_content) = delta.as_ref().and_then(|d| d.reasoning_content.as_ref()) {
             if !reasoning_content.is_empty() {
                 return AnthropicStreamChunk::ContentBlockDelta {
                     index: 0,
@@ -151,8 +362,8 @@ impl From<OpenAIStreamChunk> for AnthropicStreamChunk {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     fn openai_to_anthropic_stream_chunk(chunk: &Value) -> Value {
         let openai_chunk: OpenAIStreamChunk = serde_json::from_value(chunk.clone()).unwrap();
@@ -180,7 +391,7 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         assert_eq!(anthropic_chunk["type"], "content_block_delta");
         assert_eq!(anthropic_chunk["delta"]["type"], "text_delta");
         assert_eq!(anthropic_chunk["delta"]["text"], "Hello");
@@ -206,10 +417,13 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         assert_eq!(anthropic_chunk["type"], "content_block_delta");
         assert_eq!(anthropic_chunk["delta"]["type"], "thinking_delta");
-        assert_eq!(anthropic_chunk["delta"]["thinking"], "I need to think about this.");
+        assert_eq!(
+            anthropic_chunk["delta"]["thinking"],
+            "I need to think about this."
+        );
     }
 
     #[test]
@@ -242,12 +456,15 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         assert_eq!(anthropic_chunk["type"], "content_block_delta");
         assert_eq!(anthropic_chunk["delta"]["type"], "input_json_delta");
         assert_eq!(anthropic_chunk["delta"]["name"], "get_weather");
         assert_eq!(anthropic_chunk["delta"]["id"], "call_abc123");
-        assert_eq!(anthropic_chunk["delta"]["partial_json"], "{\"location\": \"San Francisco\"}");
+        assert_eq!(
+            anthropic_chunk["delta"]["partial_json"],
+            "{\"location\": \"San Francisco\"}"
+        );
     }
 
     #[test]
@@ -268,7 +485,7 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         assert_eq!(anthropic_chunk["type"], "message_delta");
         assert_eq!(anthropic_chunk["delta"]["stop_reason"], "end_turn");
     }
@@ -299,7 +516,7 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         assert_eq!(anthropic_chunk["type"], "content_block_delta");
         assert_eq!(anthropic_chunk["delta"]["type"], "text_delta");
         assert_eq!(anthropic_chunk["delta"]["text"], "Hello");
@@ -322,7 +539,7 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         // 空增量应该返回 ping 心跳包
         assert_eq!(anthropic_chunk["type"], "ping");
     }
@@ -338,8 +555,34 @@ mod tests {
         });
 
         let anthropic_chunk = openai_to_anthropic_stream_chunk(&openai_chunk);
-        
+
         // 没有 choices 应该返回 ping 心跳包
         assert_eq!(anthropic_chunk["type"], "ping");
+    }
+
+    #[test]
+    fn test_responses_text_delta_to_anthropic() {
+        let responses_chunk = ResponsesStreamChunk {
+            event_type: "response.output_text.delta".to_string(),
+            payload: ResponsesStreamEventPayload::OutputTextDelta {
+                item_id: "item-0".to_string(),
+                output_index: 0,
+                content_index: 0,
+                delta: "Hello".to_string(),
+            },
+        };
+
+        let anthropic_chunk: AnthropicStreamChunk = responses_chunk.into();
+
+        match anthropic_chunk {
+            AnthropicStreamChunk::ContentBlockDelta { index, delta } => {
+                assert_eq!(index, 0);
+                match delta {
+                    AnthropicStreamDelta::TextDelta { text } => assert_eq!(text, "Hello"),
+                    _ => panic!("expected text delta"),
+                }
+            }
+            _ => panic!("expected content_block_delta"),
+        }
     }
 }

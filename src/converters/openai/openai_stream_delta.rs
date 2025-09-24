@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::openai::openai_stream_tool_call::OpenAIStreamToolCall;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIStreamDelta {

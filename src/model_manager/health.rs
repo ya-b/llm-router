@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, ModelGroupEntry};
 use super::types::ModelKey;
+use crate::config::{Config, ModelGroupEntry};
 
 pub struct Health {
     // factor in percentage points (100 = 1.0x)
@@ -24,7 +24,11 @@ impl Health {
                 breaker.insert(key, Breaker::default());
             }
         }
-        Self { factors, breaker: Mutex::new(breaker), cfg: HealthConfig::default() }
+        Self {
+            factors,
+            breaker: Mutex::new(breaker),
+            cfg: HealthConfig::default(),
+        }
     }
 
     pub fn effective_weight(&self, group_name: &str, entry: &ModelGroupEntry) -> u32 {
@@ -36,7 +40,9 @@ impl Health {
             .map(|a| a.load(Ordering::SeqCst))
             .unwrap_or(100);
         let mut eff = (base as u64 * factor as u64) / 100;
-        if base > 0 && eff == 0 { eff = 1; }
+        if base > 0 && eff == 0 {
+            eff = 1;
+        }
         eff as u32
     }
 
@@ -45,7 +51,9 @@ impl Health {
             loop {
                 let cur = f.load(Ordering::SeqCst);
                 let next = (cur / 2).max(1);
-                if f.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                if f.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
                     break;
                 }
             }
@@ -56,11 +64,17 @@ impl Health {
         if let Some(f) = self.factors.get(key) {
             loop {
                 let cur = f.load(Ordering::SeqCst);
-                if cur >= 100 { break; }
+                if cur >= 100 {
+                    break;
+                }
                 let step = self.cfg.recovery_step;
                 let mut next = cur.saturating_add(step);
-                if next > 100 { next = 100; }
-                if f.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                if next > 100 {
+                    next = 100;
+                }
+                if f.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
                     break;
                 }
             }
@@ -113,7 +127,11 @@ impl Health {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CircuitState { Closed, Open, HalfOpen }
+enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
 
 #[derive(Clone, Debug)]
 struct Breaker {
@@ -124,7 +142,11 @@ struct Breaker {
 
 impl Default for Breaker {
     fn default() -> Self {
-        Self { state: CircuitState::Closed, consecutive_failures: 0, open_until: None }
+        Self {
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            open_until: None,
+        }
     }
 }
 
@@ -137,6 +159,10 @@ pub struct HealthConfig {
 
 impl Default for HealthConfig {
     fn default() -> Self {
-        Self { fail_threshold: 3, open_duration: Duration::from_secs(30), recovery_step: 10 }
+        Self {
+            fail_threshold: 3,
+            open_duration: Duration::from_secs(30),
+            recovery_step: 10,
+        }
     }
 }

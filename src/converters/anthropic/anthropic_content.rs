@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::anthropic::AnthropicContentObject;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

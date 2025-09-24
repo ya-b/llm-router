@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::anthropic::{AnthropicContentObject, AnthropicUsage};
-use crate::converters::openai::OpenAIResponse;
-use serde_json::Value;
 use crate::converters::helpers;
+use crate::converters::openai::OpenAIResponse;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicResponse {
@@ -22,27 +22,28 @@ pub struct AnthropicResponse {
 impl From<OpenAIResponse> for AnthropicResponse {
     fn from(openai_resp: OpenAIResponse) -> Self {
         let mut content_objects = Vec::new();
-        
+
         if let Some(reasoning_content) = &openai_resp.choices[0].message.reasoning_content {
             if !reasoning_content.trim().is_empty() {
                 content_objects.push(AnthropicContentObject::Thinking {
                     thinking: reasoning_content.clone(),
-                    signature: None
+                    signature: None,
                 });
             }
         }
-        
+
         if let Some(content) = &openai_resp.choices[0].message.content {
             if !content.trim().is_empty() {
                 content_objects.push(AnthropicContentObject::Text {
-                    text: content.clone()
+                    text: content.clone(),
                 });
             }
         }
-        
+
         if let Some(tool_calls) = &openai_resp.choices[0].message.tool_calls {
             for tool_call in tool_calls {
-                let input = serde_json::from_str(&tool_call.function.arguments).unwrap_or_else(|_| serde_json::json!({}));
+                let input = serde_json::from_str(&tool_call.function.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
                 content_objects.push(AnthropicContentObject::ToolUse {
                     id: tool_call.id.clone(),
                     name: tool_call.function.name.clone(),
@@ -50,7 +51,7 @@ impl From<OpenAIResponse> for AnthropicResponse {
                 });
             }
         }
-        
+
         AnthropicResponse {
             id: openai_resp.id,
             r#type: "message".to_string(),
@@ -58,7 +59,14 @@ impl From<OpenAIResponse> for AnthropicResponse {
             content: content_objects,
             model: openai_resp.model.clone(),
             stop_sequence: None,
-            stop_reason: Some(helpers::map_openai_finish_reason_to_anthropic(&Value::String(openai_resp.choices[0].finish_reason.clone())).as_str().unwrap_or("end_turn").to_string()),
+            stop_reason: Some(
+                helpers::map_openai_finish_reason_to_anthropic(&Value::String(
+                    openai_resp.choices[0].finish_reason.clone(),
+                ))
+                .as_str()
+                .unwrap_or("end_turn")
+                .to_string(),
+            ),
             usage: openai_resp.usage.map(|usage| AnthropicUsage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
@@ -67,12 +75,10 @@ impl From<OpenAIResponse> for AnthropicResponse {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
-
+    use serde_json::json;
 
     #[test]
     fn test_openai_to_anthropic_response() {
@@ -99,11 +105,10 @@ mod tests {
             }
         });
 
-
         let openai_response: OpenAIResponse = serde_json::from_value(json_response).expect("error");
 
         let anthropic_response: AnthropicResponse = openai_response.into();
-        
+
         assert_eq!(anthropic_response.id, "chatcmpl-123");
         assert_eq!(anthropic_response.r#type, "message");
         assert_eq!(anthropic_response.role, "assistant");
@@ -150,11 +155,15 @@ mod tests {
         let openai_response: OpenAIResponse = serde_json::from_value(json_response).expect("error");
 
         let anthropic_response: AnthropicResponse = openai_response.into();
-        
+
         assert_eq!(anthropic_response.id, "chatcmpl-456");
         assert_eq!(anthropic_response.r#type, "message");
         assert_eq!(anthropic_response.role, "assistant");
-        if let AnthropicContentObject::Thinking { thinking, signature: _ } = &anthropic_response.content[0] {
+        if let AnthropicContentObject::Thinking {
+            thinking,
+            signature: _,
+        } = &anthropic_response.content[0]
+        {
             assert_eq!(thinking, "I need to think about this step by step.");
         } else {
             panic!("Expected AnthropicContentObject::Text");
@@ -211,16 +220,17 @@ mod tests {
         let openai_response: OpenAIResponse = serde_json::from_value(json_response).expect("error");
 
         let anthropic_response: AnthropicResponse = openai_response.into();
-        
+
         assert_eq!(anthropic_response.id, "chatcmpl-789");
         assert_eq!(anthropic_response.r#type, "message");
         assert_eq!(anthropic_response.role, "assistant");
-        if let AnthropicContentObject::Text { text} = &anthropic_response.content[0] {
+        if let AnthropicContentObject::Text { text } = &anthropic_response.content[0] {
             assert_eq!(text, "I'll help you get the weather.");
         } else {
             panic!("Expected AnthropicContentObject::Text");
         }
-        if let AnthropicContentObject::ToolUse { id, name, input } = &anthropic_response.content[1] {
+        if let AnthropicContentObject::ToolUse { id, name, input } = &anthropic_response.content[1]
+        {
             assert_eq!(id, "call_abc123");
             assert_eq!(name, "get_weather");
             assert_eq!(input["location"], "San Francisco, CA");
@@ -259,7 +269,7 @@ mod tests {
         let openai_response: OpenAIResponse = serde_json::from_value(json_response).expect("error");
 
         let anthropic_response: AnthropicResponse = openai_response.into();
-        
+
         assert_eq!(anthropic_response.id, "chatcmpl-empty");
         assert_eq!(anthropic_response.r#type, "message");
         assert_eq!(anthropic_response.role, "assistant");
@@ -291,17 +301,15 @@ mod tests {
         let openai_response: OpenAIResponse = serde_json::from_value(json_response).expect("error");
 
         let anthropic_response: AnthropicResponse = openai_response.into();
-        
+
         assert_eq!(anthropic_response.id, "chatcmpl-max");
         assert_eq!(anthropic_response.r#type, "message");
         assert_eq!(anthropic_response.role, "assistant");
-        if let AnthropicContentObject::Text { text} = &anthropic_response.content[0] {
+        if let AnthropicContentObject::Text { text } = &anthropic_response.content[0] {
             assert_eq!(text, "This is a truncated response because");
         } else {
             panic!("Expected AnthropicContentObject::Text");
         }
         assert_eq!(anthropic_response.stop_reason.unwrap(), "max_tokens");
     }
-
-
 }

@@ -132,13 +132,19 @@ impl ModelManager {
         for (idx, model) in config.model_list.iter().enumerate() {
             model_index.insert(model.model_name.clone(), idx);
         }
-        Self { config, current_weights, active_requests, group_locks, health: health, model_index }
+        Self {
+            config,
+            current_weights,
+            active_requests,
+            group_locks,
+            health: health,
+            model_index,
+        }
     }
 
     // Helper: find a model config by exact name
     fn find_model(&self, name: &str) -> Option<&ModelConfig> {
-        self
-            .model_index
+        self.model_index
             .get(name)
             .and_then(|&idx| self.config.model_list.get(idx))
     }

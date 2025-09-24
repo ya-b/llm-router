@@ -1,6 +1,6 @@
+use crate::utils::jq_util::check_jaq_filter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use crate::utils::jq_util::check_jaq_filter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -20,6 +20,7 @@ pub enum ApiType {
     OpenAI,
     Anthropic,
     Gemini,
+    Responses,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +52,7 @@ pub enum RoutingStrategy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelGroup {
     pub name: String,
-    
+
     pub models: Vec<ModelGroupEntry>,
 }
 
@@ -69,33 +70,35 @@ fn default_weight() -> u32 {
     100
 }
 
-fn default_json_object() -> Value { json!({}) }
+fn default_json_object() -> Value {
+    json!({})
+}
 
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Config = serde_yaml::from_str(&content)?;
-        
+
         // Normalize rewrite_body/rewrite_header allowing stringified JSON in YAML
         for mc in &mut config.model_list {
             normalize_llm_params(&mut mc.llm_params);
         }
-        
+
         Self::validate_model_names(&config)?;
-        
+
         Self::validate_model_group_names(&config)?;
-        
+
         Self::validate_model_group_model_names(&config)?;
 
         // Validate selectors in model groups (non-empty only)
         Self::validate_model_group_selectors(&config)?;
-        
+
         Ok(config)
     }
-    
+
     fn validate_model_names(config: &Config) -> anyhow::Result<()> {
         let mut seen_names = std::collections::HashSet::new();
-        
+
         for model in &config.model_list {
             if seen_names.contains(&model.model_name) {
                 return Err(anyhow::anyhow!(
@@ -105,40 +108,42 @@ impl Config {
             }
             seen_names.insert(model.model_name.clone());
         }
-        
+
         Ok(())
     }
-    
+
     fn validate_model_group_names(config: &Config) -> anyhow::Result<()> {
         let mut model_group_names = std::collections::HashSet::new();
-        
+
         for model_group in &config.router_settings.model_groups {
             if model_group_names.contains(&model_group.name) {
                 return Err(anyhow::anyhow!(
-                    "Duplicate model_group names '{}' found in model_group", &model_group.name
+                    "Duplicate model_group names '{}' found in model_group",
+                    &model_group.name
                 ));
             }
             model_group_names.insert(model_group.name.clone());
         }
-        
+
         Ok(())
     }
-    
+
     fn validate_model_group_model_names(config: &Config) -> anyhow::Result<()> {
         for model_group in &config.router_settings.model_groups {
             let mut seen_names = std::collections::HashSet::new();
-            
+
             for entry in &model_group.models {
                 if seen_names.contains(&entry.name) {
                     return Err(anyhow::anyhow!(
                         "Duplicate model name '{}' found in model_group '{}'. Model names in a group must be unique.",
-                        entry.name, &model_group.name
+                        entry.name,
+                        &model_group.name
                     ));
                 }
                 seen_names.insert(entry.name.clone());
             }
         }
-        
+
         Ok(())
     }
 
@@ -166,9 +171,13 @@ impl Config {
 fn normalize_llm_params(params: &mut LLMParams) {
     // If the YAML provided a quoted JSON string, try to parse into JSON object/value
     if let Value::String(s) = &params.rewrite_body {
-        if let Ok(v) = serde_json::from_str::<Value>(s) { params.rewrite_body = v; }
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            params.rewrite_body = v;
+        }
     }
     if let Value::String(s) = &params.rewrite_header {
-        if let Ok(v) = serde_json::from_str::<Value>(s) { params.rewrite_header = v; }
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            params.rewrite_header = v;
+        }
     }
 }

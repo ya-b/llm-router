@@ -1,11 +1,11 @@
-use std::io::{self, Write, Read, Seek, SeekFrom};
 use std::fs::OpenOptions;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::Level;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub fn init_logging(log_level: Level, log_file: Option<&str>) {
     let level_filter = LevelFilter::from_level(log_level);
@@ -27,7 +27,11 @@ pub fn init_logging(log_level: Level, log_file: Option<&str>) {
 
 fn make_capped_file_writer(path: PathBuf, max_len: u64) -> impl Fn() -> CappedFileWriter {
     let lock = std::sync::Arc::new(Mutex::new(()));
-    move || CappedFileWriter { path: path.clone(), max_len, lock: lock.clone() }
+    move || CappedFileWriter {
+        path: path.clone(),
+        max_len,
+        lock: lock.clone(),
+    }
 }
 
 struct CappedFileWriter {
@@ -42,7 +46,9 @@ impl Write for CappedFileWriter {
 
         let mut need_truncate = false;
         if let Ok(meta) = std::fs::metadata(&self.path) {
-            if meta.len() >= self.max_len { need_truncate = true; }
+            if meta.len() >= self.max_len {
+                need_truncate = true;
+            }
         }
 
         if need_truncate {
@@ -51,7 +57,11 @@ impl Write for CappedFileWriter {
             if let Ok(mut rf) = OpenOptions::new().read(true).open(&self.path) {
                 if let Ok(meta) = rf.metadata() {
                     let size = meta.len();
-                    let start = if size > keep_bytes { size - keep_bytes } else { 0 };
+                    let start = if size > keep_bytes {
+                        size - keep_bytes
+                    } else {
+                        0
+                    };
                     if rf.seek(SeekFrom::Start(start)).is_ok() {
                         let _ = rf.read_to_end(&mut tail);
                     }
@@ -75,5 +85,7 @@ impl Write for CappedFileWriter {
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }

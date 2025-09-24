@@ -1,8 +1,14 @@
 use crate::converters::anthropic::{AnthropicContentObject, AnthropicResponse};
-use crate::converters::gemini::{GeminiResponse, GeminiPart, GeminiFinishReason};
+use crate::converters::gemini::{GeminiFinishReason, GeminiPart, GeminiResponse};
 use crate::converters::helpers;
+use crate::converters::openai::openai_completion_tokens_details::OpenAICompletionTokensDetails;
+use crate::converters::openai::openai_prompt_tokens_details::OpenAIPromptTokensDetails;
 use crate::converters::openai::{
     OpenAIChoice, OpenAIResponseMessage, OpenAIToolCall, OpenAIToolCallFunction, OpenAIUsage,
+};
+use crate::converters::responses::{
+    ResponsesContentPart, ResponsesOutputItem, ResponsesReasoningSummary, ResponsesResponse,
+    ResponsesUsage, ResponsesUsageDetail,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,8 +25,7 @@ pub struct OpenAIResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier : Option<String>,
-
+    pub service_tier: Option<String>,
 }
 
 impl From<AnthropicResponse> for OpenAIResponse {
@@ -126,49 +131,68 @@ impl From<GeminiResponse> for OpenAIResponse {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let (text, reasoning_text, tool_calls, finish_reason) = if let Some(first) = resp.candidates.get(0) {
-            let mut t = String::new();
-            let mut rt = String::new();
-            let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
-            let mut saw_tool_call = false;
-            for (idx, p) in first.content.parts.iter().enumerate() {
-                match p {
-                    GeminiPart::Text { text, thought, thought_signature: _ } => {
-                        if let Some(true) = thought {
-                            rt.push_str(&text);
-                        } else {
-                            t.push_str(&text);
+        let (text, reasoning_text, tool_calls, finish_reason) =
+            if let Some(first) = resp.candidates.get(0) {
+                let mut t = String::new();
+                let mut rt = String::new();
+                let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
+                let mut saw_tool_call = false;
+                for (idx, p) in first.content.parts.iter().enumerate() {
+                    match p {
+                        GeminiPart::Text {
+                            text,
+                            thought,
+                            thought_signature: _,
+                        } => {
+                            if let Some(true) = thought {
+                                rt.push_str(&text);
+                            } else {
+                                t.push_str(&text);
+                            }
                         }
-                    },
-                    GeminiPart::InlineData { inline_data: _ } => {},
-                    GeminiPart::FunctionCall { function_call, thought_signature: _ } => {
-                        saw_tool_call = true;
-                        tool_calls.push(OpenAIToolCall {
-                            id: format!("tool_call_{}", idx),
-                            r#type: "function".to_string(),
-                            function: OpenAIToolCallFunction {
-                                name: function_call.name.clone(),
-                                arguments: serde_json::to_string(&function_call.args)
-                                    .unwrap_or_else(|_| "{}".to_string()),
-                            },
-                        });
-                    },
-                    GeminiPart::FunctionResponse { function_response: _ } => {},
+                        GeminiPart::InlineData { inline_data: _ } => {}
+                        GeminiPart::FunctionCall {
+                            function_call,
+                            thought_signature: _,
+                        } => {
+                            saw_tool_call = true;
+                            tool_calls.push(OpenAIToolCall {
+                                id: format!("tool_call_{}", idx),
+                                r#type: "function".to_string(),
+                                function: OpenAIToolCallFunction {
+                                    name: function_call.name.clone(),
+                                    arguments: serde_json::to_string(&function_call.args)
+                                        .unwrap_or_else(|_| "{}".to_string()),
+                                },
+                            });
+                        }
+                        GeminiPart::FunctionResponse {
+                            function_response: _,
+                        } => {}
+                    }
                 }
-            }
-            let fr = if saw_tool_call {
-                "tool_calls".to_string()
+                let fr = if saw_tool_call {
+                    "tool_calls".to_string()
+                } else {
+                    match first.finish_reason.as_ref() {
+                        Some(GeminiFinishReason::Stop) => "stop".to_string(),
+                        Some(GeminiFinishReason::MaxTokens) => "length".to_string(),
+                        _ => "stop".to_string(),
+                    }
+                };
+                (
+                    Some(t),
+                    Some(rt),
+                    if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    fr,
+                )
             } else {
-                match first.finish_reason.as_ref() {
-                    Some(GeminiFinishReason::Stop) => "stop".to_string(),
-                    Some(GeminiFinishReason::MaxTokens) => "length".to_string(),
-                    _ => "stop".to_string(),
-                }
+                (None, None, None, "stop".to_string())
             };
-            (Some(t), Some(rt), if tool_calls.is_empty() { None } else { Some(tool_calls) }, fr)
-        } else {
-            (None, None, None, "stop".to_string())
-        };
 
         OpenAIResponse {
             id: format!("gen-{}", now_secs),
@@ -201,11 +225,237 @@ impl From<GeminiResponse> for OpenAIResponse {
     }
 }
 
+impl From<ResponsesResponse> for OpenAIResponse {
+    fn from(resp: ResponsesResponse) -> Self {
+        let mut choices = Vec::new();
+        let mut pending_tool_calls: Vec<OpenAIToolCall> = Vec::new();
+
+        for item in resp.output.into_iter() {
+            match item {
+                ResponsesOutputItem::Message {
+                    role,
+                    content,
+                    status,
+                    ..
+                } => {
+                    let mut fields = extract_message_fields(content);
+
+                    if fields.tool_calls.is_empty() && !pending_tool_calls.is_empty() {
+                        fields.tool_calls.extend(pending_tool_calls.drain(..));
+                    }
+
+                    let finish_reason = if !fields.tool_calls.is_empty() {
+                        "tool_calls".to_string()
+                    } else {
+                        map_responses_status_to_finish_reason(Some(status.as_str()))
+                    };
+
+                    choices.push(OpenAIChoice {
+                        index: choices.len() as i32,
+                        message: OpenAIResponseMessage {
+                            role,
+                            content: fields.text,
+                            reasoning_content: fields.reasoning,
+                            tool_calls: if fields.tool_calls.is_empty() {
+                                None
+                            } else {
+                                Some(fields.tool_calls)
+                            },
+                        },
+                        finish_reason,
+                    });
+                }
+                ResponsesOutputItem::FunctionCall {
+                    call_id: _,
+                    name,
+                    arguments,
+                    id,
+                    ..
+                } => {
+                    pending_tool_calls.push(OpenAIToolCall {
+                        id,
+                        r#type: "function".to_string(),
+                        function: OpenAIToolCallFunction { name, arguments },
+                    });
+                }
+                ResponsesOutputItem::ToolUse { .. } | ResponsesOutputItem::Unknown => {
+                    // These variants do not have a direct OpenAI Chat Completion equivalent.
+                }
+            }
+        }
+
+        if !pending_tool_calls.is_empty() {
+            if let Some(last_choice) = choices.last_mut() {
+                let mut calls = last_choice.message.tool_calls.take().unwrap_or_default();
+                calls.extend(pending_tool_calls);
+                last_choice.message.tool_calls = Some(calls);
+                if last_choice.finish_reason != "tool_calls" {
+                    last_choice.finish_reason = "tool_calls".to_string();
+                }
+            }
+        }
+
+        if choices.is_empty() {
+            choices.push(OpenAIChoice {
+                index: 0,
+                message: OpenAIResponseMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: map_responses_status_to_finish_reason(Some(resp.status.as_str())),
+            });
+        }
+
+        OpenAIResponse {
+            id: resp.id,
+            object: resp.object.or_else(|| Some("chat.completion".to_string())),
+            created: resp.created_at,
+            model: resp.model,
+            choices,
+            usage: resp.usage.map(convert_usage_to_openai),
+            system_fingerprint: None,
+            service_tier: None,
+        }
+    }
+}
+
+struct ExtractedFields {
+    text: Option<String>,
+    reasoning: Option<String>,
+    tool_calls: Vec<OpenAIToolCall>,
+}
+
+fn extract_message_fields(parts: Vec<ResponsesContentPart>) -> ExtractedFields {
+    let mut text_buffer = String::new();
+    let mut reasoning_segments: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
+
+    for part in parts {
+        match part {
+            ResponsesContentPart::InputText { text, .. }
+            | ResponsesContentPart::OutputText { text, .. }
+            | ResponsesContentPart::Refusal { refusal: text, .. } => {
+                if !text_buffer.is_empty() {
+                    text_buffer.push_str("\n");
+                }
+                text_buffer.push_str(&text);
+            }
+            ResponsesContentPart::Reasoning { summary, .. } => {
+                let segment = summary
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        ResponsesReasoningSummary::SummaryText { text, .. } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !segment.is_empty() {
+                    reasoning_segments.push(segment);
+                }
+            }
+            ResponsesContentPart::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                id,
+                ..
+            } => {
+                tool_calls.push(OpenAIToolCall {
+                    id: id.unwrap_or_else(|| call_id.clone()),
+                    r#type: "function".to_string(),
+                    function: OpenAIToolCallFunction { name, arguments },
+                });
+            }
+            ResponsesContentPart::FunctionCallOutput { .. }
+            | ResponsesContentPart::InputImage { .. }
+            | ResponsesContentPart::InputFile { .. }
+            | ResponsesContentPart::FileSearchCall { .. }
+            | ResponsesContentPart::WebSearchCall { .. }
+            | ResponsesContentPart::ComputerCall { .. }
+            | ResponsesContentPart::ComputerCallOutput { .. }
+            | ResponsesContentPart::ItemReference { .. }
+            | ResponsesContentPart::FileCitation { .. }
+            | ResponsesContentPart::UrlCitation { .. }
+            | ResponsesContentPart::FilePath { .. }
+            | ResponsesContentPart::Unknown => {}
+        }
+    }
+
+    ExtractedFields {
+        text: if text_buffer.is_empty() {
+            None
+        } else {
+            Some(text_buffer)
+        },
+        reasoning: if reasoning_segments.is_empty() {
+            None
+        } else {
+            Some(reasoning_segments.join("\n"))
+        },
+        tool_calls,
+    }
+}
+
+fn map_responses_status_to_finish_reason(status: Option<&str>) -> String {
+    match status {
+        Some("incomplete") => "length".to_string(),
+        Some("cancelled") => "cancelled".to_string(),
+        Some("failed") => "failed".to_string(),
+        Some("requires_action") => "tool_calls".to_string(),
+        _ => "stop".to_string(),
+    }
+}
+
+fn convert_usage_to_openai(usage: ResponsesUsage) -> OpenAIUsage {
+    let prompt_tokens = usage.input_tokens.try_into().unwrap_or(u32::MAX);
+    let completion_tokens = usage.output_tokens.try_into().unwrap_or(u32::MAX);
+    let total_tokens = usage.total_tokens.try_into().unwrap_or(u32::MAX);
+
+    OpenAIUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        completion_tokens_details: usage
+            .output_tokens_details
+            .and_then(convert_usage_detail_to_completion_detail),
+        prompt_tokens_details: usage
+            .input_tokens_details
+            .and_then(convert_usage_detail_to_prompt_detail),
+    }
+}
+
+fn convert_usage_detail_to_completion_detail(
+    detail: ResponsesUsageDetail,
+) -> Option<OpenAICompletionTokensDetails> {
+    let ResponsesUsageDetail {
+        reasoning_tokens, ..
+    } = detail;
+
+    reasoning_tokens.map(|value| OpenAICompletionTokensDetails {
+        reasoning_tokens: Some(value as u32),
+        audio_tokens: None,
+        accepted_prediction_tokens: None,
+        rejected_prediction_tokens: None,
+    })
+}
+
+fn convert_usage_detail_to_prompt_detail(
+    detail: ResponsesUsageDetail,
+) -> Option<OpenAIPromptTokensDetails> {
+    let ResponsesUsageDetail { cached_tokens, .. } = detail;
+
+    cached_tokens.map(|value| OpenAIPromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(value as u32),
+    })
+}
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_anthropic_to_openai_response() {
@@ -227,13 +477,17 @@ mod tests {
                 "output_tokens": 12
             }
         });
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "Hello, how can I help you today?");
+        assert_eq!(
+            openai_response.choices[0].message.content.as_ref().unwrap(),
+            "Hello, how can I help you today?"
+        );
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
         if let Some(usage) = &openai_response.usage {
             assert_eq!(usage.prompt_tokens, 9);
@@ -269,14 +523,25 @@ mod tests {
             }
         });
 
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "The answer is 42.");
-        assert_eq!(openai_response.choices[0].message.reasoning_content.as_ref().unwrap(), "I need to think about this step by step.");
+        assert_eq!(
+            openai_response.choices[0].message.content.as_ref().unwrap(),
+            "The answer is 42."
+        );
+        assert_eq!(
+            openai_response.choices[0]
+                .message
+                .reasoning_content
+                .as_ref()
+                .unwrap(),
+            "I need to think about this step by step."
+        );
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
         if let Some(usage) = &openai_response.usage {
             assert_eq!(usage.prompt_tokens, 15);
@@ -316,16 +581,46 @@ mod tests {
             }
         });
 
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "I'll help you get the weather.");
-        assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].id, "tool_123");
-        assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].function.name, "get_weather");
-        assert_eq!(openai_response.choices[0].message.tool_calls.as_ref().unwrap()[0].function.arguments, "{\"location\":\"San Francisco, CA\"}");
+        assert_eq!(
+            openai_response.choices[0].message.content.as_ref().unwrap(),
+            "I'll help you get the weather."
+        );
+        assert_eq!(
+            openai_response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()[0]
+                .id,
+            "tool_123"
+        );
+        assert_eq!(
+            openai_response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()[0]
+                .function
+                .name,
+            "get_weather"
+        );
+        assert_eq!(
+            openai_response.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap()[0]
+                .function
+                .arguments,
+            "{\"location\":\"San Francisco, CA\"}"
+        );
         assert_eq!(openai_response.choices[0].finish_reason, "tool_calls");
         if let Some(usage) = &openai_response.usage {
             assert_eq!(usage.prompt_tokens, 25);
@@ -348,10 +643,11 @@ mod tests {
             "stop_reason": "end_turn"
         });
 
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
         assert_eq!(openai_response.choices[0].message.content, None);
@@ -379,14 +675,25 @@ mod tests {
             "stop_reason": "end_turn"
         });
 
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "I can't share that information.");
-        assert_eq!(openai_response.choices[0].message.reasoning_content.as_ref().unwrap(), "<redacted_thinking>sensitive information</redacted_thinking>");
+        assert_eq!(
+            openai_response.choices[0].message.content.as_ref().unwrap(),
+            "I can't share that information."
+        );
+        assert_eq!(
+            openai_response.choices[0]
+                .message
+                .reasoning_content
+                .as_ref()
+                .unwrap(),
+            "<redacted_thinking>sensitive information</redacted_thinking>"
+        );
         assert_eq!(openai_response.choices[0].finish_reason, "stop");
     }
 
@@ -407,14 +714,17 @@ mod tests {
             "stop_reason": "max_tokens"
         });
 
-        let anthropic_response: AnthropicResponse = serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_value(json_response).expect("Failed to parse Anthropic response");
 
         let openai_response: OpenAIResponse = anthropic_response.into();
-        
+
         assert_eq!(openai_response.object.unwrap(), "chat.completion");
         assert_eq!(openai_response.choices[0].message.role, "assistant");
-        assert_eq!(openai_response.choices[0].message.content.as_ref().unwrap(), "This is a truncated response because");
+        assert_eq!(
+            openai_response.choices[0].message.content.as_ref().unwrap(),
+            "This is a truncated response because"
+        );
         assert_eq!(openai_response.choices[0].finish_reason, "length");
     }
-
 }

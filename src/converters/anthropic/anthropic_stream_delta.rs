@@ -8,7 +8,7 @@ pub enum AnthropicStreamDelta {
     #[serde(rename = "thinking_delta")]
     ThinkingDelta { thinking: String },
     #[serde(rename = "input_json_delta")]
-    InputJsonDelta { 
+    InputJsonDelta {
         #[serde(skip_serializing_if = "Option::is_none")]
         partial_json: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

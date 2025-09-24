@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::openai::openai_tool_call::OpenAIToolCall;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIResponseMessage {

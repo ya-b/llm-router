@@ -22,7 +22,7 @@ pub struct ModelsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
-    pub object: String
+    pub object: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

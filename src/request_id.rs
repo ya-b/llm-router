@@ -1,11 +1,6 @@
-use axum::{
-    extract::Request,
-    http::HeaderValue,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
+use tracing::{Instrument, info_span};
 use uuid::Uuid;
-use tracing::{info_span, Instrument};
 
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
@@ -46,4 +41,3 @@ pub async fn inject_request_id(mut req: Request, next: Next) -> Response {
 
     resp
 }
-

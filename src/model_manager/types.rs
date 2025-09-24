@@ -6,8 +6,9 @@ pub struct ModelKey {
 
 impl ModelKey {
     pub fn new<G: Into<String>, M: Into<String>>(group: G, model: M) -> Self {
-        Self { group: group.into(), model: model.into() }
+        Self {
+            group: group.into(),
+            model: model.into(),
+        }
     }
 }
-
-

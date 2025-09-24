@@ -1,27 +1,27 @@
 mod auth;
 mod config;
 mod converters;
-mod models;
-mod model_manager;
-mod router;
 mod llm_client;
-mod request_id;
-mod utils;
 mod logging;
 mod model_checks;
+mod model_manager;
+mod models;
+mod request_id;
+mod router;
+mod utils;
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
-use tower_http::cors::CorsLayer;
+use clap::Parser;
 use config::Config;
-use router::{anthropic_chat, openai_chat, gemini_chat, list_models};
+use router::{anthropic_chat, gemini_chat, list_models, openai_chat, responses_chat};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, Level};
-use std::str::FromStr;
-use clap::Parser;
+use tower_http::cors::CorsLayer;
+use tracing::{Level, info};
 
 #[derive(Parser, Debug)]
 #[command(name = "llm-router")]
@@ -98,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create model manager with RwLock for dynamic updates
-    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(config.clone())));
+    let model_manager = Arc::new(RwLock::new(model_manager::ModelManager::new(
+        config.clone(),
+    )));
 
     // Create app state with model manager and token
     let app_state = auth::AppState {
@@ -111,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/messages", post(anthropic_chat))
+        .route("/v1/responses", post(responses_chat))
         .route("/v1beta/models/{*tail}", post(gemini_chat))
         .route("/v1/models", get(list_models))
         .route("/health", get(|| async { "OK" }))

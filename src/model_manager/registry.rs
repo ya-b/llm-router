@@ -5,10 +5,15 @@ pub struct Registry<'a> {
 }
 
 impl<'a> Registry<'a> {
-    pub fn new(cfg: &'a Config) -> Self { Self { cfg } }
+    pub fn new(cfg: &'a Config) -> Self {
+        Self { cfg }
+    }
 
     pub fn model_exists(&self, model_name: &str) -> bool {
-        self.cfg.model_list.iter().any(|m| m.model_name == model_name)
+        self.cfg
+            .model_list
+            .iter()
+            .any(|m| m.model_name == model_name)
     }
 
     pub fn filter_valid_entries(&self, entries: &[ModelGroupEntry]) -> Vec<ModelGroupEntry> {
@@ -19,4 +24,3 @@ impl<'a> Registry<'a> {
             .collect()
     }
 }
-

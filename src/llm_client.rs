@@ -1,11 +1,11 @@
 use crate::config::{ApiType, ModelConfig};
 use crate::converters::request_wrapper::RequestWrapper;
+use crate::request_id::RequestId;
 use anyhow::Result;
 use reqwest::header::{HeaderName, HeaderValue};
 use std::future::Future;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use crate::request_id::RequestId;
 
 #[derive(Debug)]
 pub struct LlmClient {
@@ -22,25 +22,52 @@ impl LlmClient {
         match model_config.llm_params.api_type {
             ApiType::Anthropic => {
                 let path = "v1/messages";
-                if api_base.ends_with('/') { format!("{}{}", api_base, path) } else { format!("{}/{}", api_base, path) }
+                if api_base.ends_with('/') {
+                    format!("{}{}", api_base, path)
+                } else {
+                    format!("{}/{}", api_base, path)
+                }
             }
             ApiType::OpenAI => {
                 let path = "chat/completions";
-                if api_base.ends_with('/') { format!("{}{}", api_base, path) } else { format!("{}/{}", api_base, path) }
+                if api_base.ends_with('/') {
+                    format!("{}{}", api_base, path)
+                } else {
+                    format!("{}/{}", api_base, path)
+                }
             }
             ApiType::Gemini => {
                 // Determine streaming and construct proper Gemini path
                 let model = &model_config.llm_params.model;
                 let is_stream = request.is_stream().unwrap_or(false);
-                let path = if is_stream { format!("models/{}:streamGenerateContent", model) } else { format!("models/{}:generateContent", model) };
-                let mut base = if api_base.ends_with('/') { format!("{}{}", api_base, path) } else { format!("{}/{}", api_base, path) };
+                let path = if is_stream {
+                    format!("models/{}:streamGenerateContent", model)
+                } else {
+                    format!("models/{}:generateContent", model)
+                };
+                let mut base = if api_base.ends_with('/') {
+                    format!("{}{}", api_base, path)
+                } else {
+                    format!("{}/{}", api_base, path)
+                };
                 if !model_config.llm_params.api_key.is_empty() {
-                    if is_stream { base = format!("{}?alt=sse&key={}", base, model_config.llm_params.api_key); }
-                    else { base = format!("{}?key={}", base, model_config.llm_params.api_key); }
+                    if is_stream {
+                        base = format!("{}?alt=sse&key={}", base, model_config.llm_params.api_key);
+                    } else {
+                        base = format!("{}?key={}", base, model_config.llm_params.api_key);
+                    }
                 } else if is_stream {
                     base = format!("{}?alt=sse", base);
                 }
                 base
+            }
+            ApiType::Responses => {
+                let path = "responses";
+                if api_base.ends_with('/') {
+                    format!("{}{}", api_base, path)
+                } else {
+                    format!("{}/{}", api_base, path)
+                }
             }
         }
     }
@@ -56,18 +83,27 @@ impl LlmClient {
             ApiType::Anthropic => {
                 let mut anthropic_req = request.get_anthropic();
                 anthropic_req.model = model_config.llm_params.model.clone();
-                serde_json::to_value(anthropic_req).expect("Failed to serialize converted Anthropic request")
+                serde_json::to_value(anthropic_req)
+                    .expect("Failed to serialize converted Anthropic request")
             }
             ApiType::OpenAI => {
                 let mut openai_req = request.get_openai();
                 openai_req.model = model_config.llm_params.model.clone();
-                serde_json::to_value(openai_req).expect("Failed to serialize converted OpenAI request")
+                serde_json::to_value(openai_req)
+                    .expect("Failed to serialize converted OpenAI request")
             }
             ApiType::Gemini => {
                 let mut gemini_req = request.get_gemini();
                 // Path uses model; body does not include model
                 gemini_req.model = model_config.llm_params.model.clone();
-                serde_json::to_value(gemini_req).expect("Failed to serialize converted Gemini request")
+                serde_json::to_value(gemini_req)
+                    .expect("Failed to serialize converted Gemini request")
+            }
+            ApiType::Responses => {
+                let mut responses_req = request.get_responses();
+                responses_req.model = model_config.llm_params.model.clone();
+                serde_json::to_value(responses_req)
+                    .expect("Failed to serialize converted Responses request")
             }
         };
 
@@ -86,7 +122,8 @@ impl LlmClient {
 
         match model_config.llm_params.api_type {
             ApiType::Anthropic => {
-                target_request = target_request.header("x-api-key", model_config.llm_params.api_key.to_string());
+                target_request =
+                    target_request.header("x-api-key", model_config.llm_params.api_key.to_string());
             }
             ApiType::OpenAI => {
                 target_request = target_request.header(
@@ -100,6 +137,12 @@ impl LlmClient {
                 if request.is_stream().unwrap_or(false) {
                     target_request = target_request.header("Accept", "text/event-stream");
                 }
+            }
+            ApiType::Responses => {
+                target_request = target_request.header(
+                    "Authorization",
+                    format!("Bearer {}", model_config.llm_params.api_key),
+                );
             }
         }
 

@@ -1,18 +1,13 @@
-use crate::converters::openai::{
-    OpenAIRequest, OpenAIContent, OpenAITool
-};
+use crate::converters::openai::{OpenAIContent, OpenAIRequest, OpenAITool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
 // Import the structs from their new files
 use crate::converters::gemini::{
-    gemini_content::GeminiContent,
-    gemini_part::GeminiPart,
-    gemini_inline_data::GeminiInlineData,
-    gemini_tool::GeminiTool,
-    gemini_function_declaration::GeminiFunctionDeclaration,
-    gemini_generation_config::GeminiGenerationConfig,
+    gemini_content::GeminiContent, gemini_function_declaration::GeminiFunctionDeclaration,
+    gemini_generation_config::GeminiGenerationConfig, gemini_inline_data::GeminiInlineData,
+    gemini_part::GeminiPart, gemini_tool::GeminiTool,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +43,11 @@ impl From<OpenAIRequest> for GeminiRequest {
                     OpenAIContent::Text(t) => {
                         system_instruction = Some(GeminiContent {
                             role: Some("user".to_string()),
-                            parts: vec![GeminiPart::Text { text: t, thought: None, thought_signature: None }],
+                            parts: vec![GeminiPart::Text {
+                                text: t,
+                                thought: None,
+                                thought_signature: None,
+                            }],
                         });
                     }
                     OpenAIContent::Array(items) => {
@@ -61,7 +60,11 @@ impl From<OpenAIRequest> for GeminiRequest {
                         if !text.is_empty() {
                             system_instruction = Some(GeminiContent {
                                 role: Some("user".to_string()),
-                                parts: vec![GeminiPart::Text { text, thought: None, thought_signature: None }],
+                                parts: vec![GeminiPart::Text {
+                                    text,
+                                    thought: None,
+                                    thought_signature: None,
+                                }],
                             });
                         }
                     }
@@ -69,20 +72,41 @@ impl From<OpenAIRequest> for GeminiRequest {
                 continue;
             }
 
-            let role = Some(if msg.role == "assistant" { "model" } else { "user" }.to_string());
+            let role = Some(
+                if msg.role == "assistant" {
+                    "model"
+                } else {
+                    "user"
+                }
+                .to_string(),
+            );
             let parts: Vec<GeminiPart> = match msg.content {
-                OpenAIContent::Text(t) => vec![GeminiPart::Text { text: t, thought: None, thought_signature: None }],
+                OpenAIContent::Text(t) => vec![GeminiPart::Text {
+                    text: t,
+                    thought: None,
+                    thought_signature: None,
+                }],
                 OpenAIContent::Array(items) => {
                     let mut parts: Vec<GeminiPart> = Vec::new();
 
                     // Aggregate text items into a single Text part
                     let text = items
                         .iter()
-                        .filter_map(|i| if i.r#type == "text" { i.text.clone() } else { None })
+                        .filter_map(|i| {
+                            if i.r#type == "text" {
+                                i.text.clone()
+                            } else {
+                                None
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join("");
                     if !text.is_empty() {
-                        parts.push(GeminiPart::Text { text, thought: None, thought_signature: None });
+                        parts.push(GeminiPart::Text {
+                            text,
+                            thought: None,
+                            thought_signature: None,
+                        });
                     }
 
                     // Map image_url data URIs to inline_data parts
@@ -171,13 +195,12 @@ impl From<OpenAIRequest> for GeminiRequest {
     }
 }
 
-
 fn clean_json_schema_for_gemini(schema: &mut Value) {
     match schema {
         Value::Object(map) => {
             map.remove("$schema");
             map.remove("additionalProperties");
-            
+
             // Recursively clean nested objects
             for value in map.values_mut() {
                 clean_json_schema_for_gemini(value);

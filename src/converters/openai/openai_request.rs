@@ -7,13 +7,17 @@ use crate::converters::openai::{
     OpenAIContent, OpenAIContentItem, OpenAIFunction, OpenAIImageUrl, OpenAIMessage, OpenAITool,
     OpenAIToolCall, OpenAIToolCallFunction,
 };
+use crate::converters::responses::{
+    ResponsesContentPart, ResponsesInput, ResponsesMessage, ResponsesMessageContent,
+    ResponsesReasoningSummary, ResponsesRequest, ResponsesTextConfig, ResponsesTextFormat,
+    ResponsesTextFormatJsonSchema, ResponsesTool,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIRequest {
     pub model: String,
-    #[serde(alias = "input")]
     pub messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -191,8 +195,8 @@ impl From<AnthropicRequest> for OpenAIRequest {
                             name: tool.name,
                             description: tool.description,
                             parameters: tool.input_schema,
+                            strict: None,
                         },
-                        strict: None,
                     })
                     .collect()
             }),
@@ -286,5 +290,309 @@ impl From<GeminiRequest> for OpenAIRequest {
             stream: g.stream,
             extra_fields: g.extra_fields,
         }
+    }
+}
+
+impl From<ResponsesRequest> for OpenAIRequest {
+    fn from(responses: ResponsesRequest) -> Self {
+        let ResponsesRequest {
+            model,
+            input,
+            include: _,
+            instructions,
+            max_output_tokens,
+            metadata: _,
+            parallel_tool_calls: _,
+            previous_response_id: _,
+            reasoning: _,
+            service_tier: _,
+            store: _,
+            stream,
+            temperature,
+            text,
+            tool_choice: _,
+            tools,
+            top_p: _,
+            truncation: _,
+            user: _,
+            extra_fields,
+        } = responses;
+
+        let mut messages = Vec::new();
+
+        if let Some(instr) = instructions.filter(|s| !s.trim().is_empty()) {
+            messages.push(OpenAIMessage {
+                role: "system".to_string(),
+                content: OpenAIContent::Text(instr),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+
+        messages.extend(convert_responses_input_to_openai_messages(input));
+
+        let response_format = responses_text_config_to_response_format(text);
+
+        let tool_list = tools.and_then(|ts| {
+            let converted: Vec<OpenAITool> = ts
+                .into_iter()
+                .filter_map(responses_tool_to_openai_tool)
+                .collect();
+            if converted.is_empty() {
+                None
+            } else {
+                Some(converted)
+            }
+        });
+
+        OpenAIRequest {
+            model,
+            messages,
+            max_tokens: max_output_tokens,
+            temperature,
+            response_format,
+            tools: tool_list,
+            stream,
+            extra_fields,
+        }
+    }
+}
+
+fn convert_responses_input_to_openai_messages(input: ResponsesInput) -> Vec<OpenAIMessage> {
+    match input {
+        ResponsesInput::Text(text) => vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Text(text),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        ResponsesInput::Messages(messages) => messages
+            .into_iter()
+            .flat_map(convert_responses_message_to_openai)
+            .collect(),
+        ResponsesInput::ContentParts(parts) => {
+            let message = ResponsesMessage {
+                role: "user".to_string(),
+                content: ResponsesMessageContent::Parts(parts),
+                r#type: None,
+                id: None,
+                status: None,
+                name: None,
+                metadata: None,
+                extra_fields: HashMap::new(),
+            };
+            convert_responses_message_to_openai(message)
+        }
+    }
+}
+
+fn convert_responses_message_to_openai(message: ResponsesMessage) -> Vec<OpenAIMessage> {
+    match message.content {
+        ResponsesMessageContent::Text(text) => vec![OpenAIMessage {
+            role: message.role,
+            content: OpenAIContent::Text(text),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        ResponsesMessageContent::Parts(parts) => {
+            let mut text_buffer = String::new();
+            let mut media_items: Vec<OpenAIContentItem> = Vec::new();
+            let mut reasoning_segments: Vec<String> = Vec::new();
+            let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
+            let mut followup_messages: Vec<OpenAIMessage> = Vec::new();
+
+            for part in parts {
+                match part {
+                    ResponsesContentPart::InputText { text, .. }
+                    | ResponsesContentPart::OutputText { text, .. } => {
+                        if !text_buffer.is_empty() {
+                            text_buffer.push_str("\n");
+                        }
+                        text_buffer.push_str(&text);
+                    }
+                    ResponsesContentPart::Reasoning { summary, .. } => {
+                        let collected = summary
+                            .into_iter()
+                            .filter_map(|s| match s {
+                                ResponsesReasoningSummary::SummaryText { text, .. } => Some(text),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !collected.is_empty() {
+                            reasoning_segments.push(collected);
+                        }
+                    }
+                    ResponsesContentPart::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                        id,
+                        ..
+                    } => {
+                        tool_calls.push(OpenAIToolCall {
+                            id: id.unwrap_or_else(|| call_id.clone()),
+                            r#type: "function".to_string(),
+                            function: OpenAIToolCallFunction { name, arguments },
+                        });
+                    }
+                    ResponsesContentPart::FunctionCallOutput {
+                        call_id, output, ..
+                    } => {
+                        followup_messages.push(OpenAIMessage {
+                            role: "tool".to_string(),
+                            content: OpenAIContent::Text(output),
+                            tool_calls: None,
+                            tool_call_id: Some(call_id),
+                            reasoning_content: None,
+                        });
+                    }
+                    ResponsesContentPart::InputImage {
+                        image_url, file_id, ..
+                    } => {
+                        if let Some(url) =
+                            image_url.or_else(|| file_id.map(|id| format!("openai://file/{}", id)))
+                        {
+                            media_items.push(OpenAIContentItem {
+                                r#type: "image_url".to_string(),
+                                text: None,
+                                image_url: Some(OpenAIImageUrl { url }),
+                            });
+                        }
+                    }
+                    ResponsesContentPart::Refusal { refusal, .. } => {
+                        if !text_buffer.is_empty() {
+                            text_buffer.push_str("\n");
+                        }
+                        text_buffer.push_str(&refusal);
+                    }
+                    ResponsesContentPart::InputFile {
+                        filename, file_id, ..
+                    } => {
+                        let mut placeholder = String::from("[file]");
+                        if let Some(name) = filename {
+                            placeholder = format!("[file:{}]", name);
+                        } else if let Some(id) = file_id {
+                            placeholder = format!("[file_id:{}]", id);
+                        }
+                        if !text_buffer.is_empty() {
+                            text_buffer.push_str("\n");
+                        }
+                        text_buffer.push_str(&placeholder);
+                    }
+                    ResponsesContentPart::FileSearchCall { .. }
+                    | ResponsesContentPart::WebSearchCall { .. }
+                    | ResponsesContentPart::ComputerCall { .. }
+                    | ResponsesContentPart::ComputerCallOutput { .. }
+                    | ResponsesContentPart::ItemReference { .. }
+                    | ResponsesContentPart::FileCitation { .. }
+                    | ResponsesContentPart::UrlCitation { .. }
+                    | ResponsesContentPart::FilePath { .. }
+                    | ResponsesContentPart::Unknown => {
+                        // Unsupported part types are skipped.
+                    }
+                }
+            }
+
+            let reasoning = reasoning_segments.join("\n");
+            let mut content = if media_items.is_empty() {
+                OpenAIContent::Text(text_buffer.clone())
+            } else {
+                let mut items = media_items;
+                if !text_buffer.is_empty() {
+                    items.insert(
+                        0,
+                        OpenAIContentItem {
+                            r#type: "text".to_string(),
+                            text: Some(text_buffer.clone()),
+                            image_url: None,
+                        },
+                    );
+                }
+                OpenAIContent::Array(items)
+            };
+
+            // Ensure we have at least empty text content when required
+            if matches!(content, OpenAIContent::Text(ref t) if t.is_empty())
+                && tool_calls.is_empty()
+                && reasoning.is_empty()
+            {
+                content = OpenAIContent::Text(text_buffer);
+            }
+
+            let mut messages = Vec::new();
+            if !matches!(&content, OpenAIContent::Text(t) if t.is_empty())
+                || !tool_calls.is_empty()
+                || !reasoning.is_empty()
+            {
+                messages.push(OpenAIMessage {
+                    role: message.role,
+                    content,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    tool_call_id: None,
+                    reasoning_content: if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning)
+                    },
+                });
+            }
+            messages.extend(followup_messages);
+            messages
+        }
+    }
+}
+
+fn responses_tool_to_openai_tool(tool: ResponsesTool) -> Option<OpenAITool> {
+    match tool {
+        ResponsesTool::Function {
+            name,
+            parameters,
+            strict,
+            description,
+            ..
+        } => Some(OpenAITool {
+            r#type: "function".to_string(),
+            function: OpenAIFunction {
+                name,
+                description: description.unwrap_or_default(),
+                parameters,
+                strict,
+            },
+        }),
+        _ => None,
+    }
+}
+
+fn responses_text_config_to_response_format(
+    text: Option<ResponsesTextConfig>,
+) -> Option<OpenAIResponseFormat> {
+    let config = text?;
+    match config.format {
+        Some(ResponsesTextFormat::JsonObject { .. }) => Some(OpenAIResponseFormat {
+            r#type: "json_object".to_string(),
+            json_schema: None,
+        }),
+        Some(ResponsesTextFormat::JsonSchema(ResponsesTextFormatJsonSchema {
+            name,
+            schema,
+            strict,
+            ..
+        })) => Some(OpenAIResponseFormat {
+            r#type: "json_schema".to_string(),
+            json_schema: Some(OpenAIJSONSchemaSpec {
+                name,
+                schema,
+                strict,
+            }),
+        }),
+        _ => None,
     }
 }

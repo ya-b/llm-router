@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::converters::openai::openai_image_url::OpenAIImageUrl;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIContentItem {

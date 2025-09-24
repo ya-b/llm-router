@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::converters::openai::openai_completion_tokens_details::OpenAICompletionTokensDetails;
 use crate::converters::openai::OpenAIPromptTokensDetails;
+use crate::converters::openai::openai_completion_tokens_details::OpenAICompletionTokensDetails;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIUsage {

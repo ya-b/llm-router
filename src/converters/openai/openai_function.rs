@@ -5,4 +5,5 @@ pub struct OpenAIFunction {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    pub strict: Option<bool>,
 }

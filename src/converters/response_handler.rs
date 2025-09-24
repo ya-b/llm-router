@@ -8,6 +8,7 @@ use crate::converters::anthropic::AnthropicResponse;
 use crate::converters::gemini::GeminiResponse;
 use crate::converters::openai::OpenAIResponse;
 use crate::converters::response_wrapper::ResponseWrapper;
+use crate::converters::responses::{ResponsesResponse, ResponsesStreamChunk};
 use crate::models::{ErrorDetail, ErrorResponse};
 use axum::{
     Json,
@@ -49,7 +50,28 @@ pub async fn handle_non_streaming_response(
                 Ok(mut resp) => {
                     resp.model = model.clone();
                     ResponseWrapper::OpenAI(resp)
-                },
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize OpenAI response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::OpenAI, ApiType::Responses) => {
+            match serde_json::from_str::<OpenAIResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    let responses_resp: ResponsesResponse = resp.into();
+                    ResponseWrapper::Responses(responses_resp)
+                }
                 Err(e) => {
                     warn!("Failed to deserialize OpenAI response: {}", e);
                     let error_response = ErrorResponse {
@@ -69,7 +91,29 @@ pub async fn handle_non_streaming_response(
                 Ok(mut resp) => {
                     resp.model_version = Some(model.clone());
                     ResponseWrapper::Gemini(resp)
-                },
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Gemini response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Gemini, ApiType::Responses) => {
+            match serde_json::from_str::<GeminiResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model_version = Some(model.clone());
+                    let openai_resp: OpenAIResponse = resp.into();
+                    let responses_resp: ResponsesResponse = openai_resp.into();
+                    ResponseWrapper::Responses(responses_resp)
+                }
                 Err(e) => {
                     warn!("Failed to deserialize Gemini response: {}", e);
                     let error_response = ErrorResponse {
@@ -89,7 +133,29 @@ pub async fn handle_non_streaming_response(
                 Ok(mut resp) => {
                     resp.model = model.clone();
                     ResponseWrapper::Anthropic(resp)
-                },
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Anthropic response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Anthropic, ApiType::Responses) => {
+            match serde_json::from_str::<AnthropicResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    let openai_resp: OpenAIResponse = resp.into();
+                    let responses_resp: ResponsesResponse = openai_resp.into();
+                    ResponseWrapper::Responses(responses_resp)
+                }
                 Err(e) => {
                     warn!("Failed to deserialize Anthropic response: {}", e);
                     let error_response = ErrorResponse {
@@ -214,6 +280,88 @@ pub async fn handle_non_streaming_response(
                 }
                 Err(e) => {
                     warn!("Failed to deserialize OpenAI response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Responses, ApiType::OpenAI) => {
+            match serde_json::from_str::<ResponsesResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    ResponseWrapper::OpenAI(resp.into())
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Responses response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Responses, ApiType::Anthropic) => {
+            match serde_json::from_str::<ResponsesResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    let openai_resp: OpenAIResponse = resp.into();
+                    ResponseWrapper::Anthropic(openai_resp.into())
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Responses response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Responses, ApiType::Gemini) => {
+            match serde_json::from_str::<ResponsesResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    let openai_resp: OpenAIResponse = resp.into();
+                    ResponseWrapper::Gemini(openai_resp.into())
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Responses response: {}", e);
+                    let error_response = ErrorResponse {
+                        error: ErrorDetail {
+                            message: format!("Failed to deserialize response: {}", e),
+                            r#type: "api_error".to_string(),
+                            code: Some("deserialize_error".to_string()),
+                        },
+                    };
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                        .into_response();
+                }
+            }
+        }
+        (ApiType::Responses, ApiType::Responses) => {
+            match serde_json::from_str::<ResponsesResponse>(&response_text) {
+                Ok(mut resp) => {
+                    resp.model = model.clone();
+                    ResponseWrapper::Responses(resp)
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize Responses response: {}", e);
                     let error_response = ErrorResponse {
                         error: ErrorDetail {
                             message: format!("Failed to deserialize response: {}", e),
@@ -566,6 +714,129 @@ pub fn convert_sse_data_line(
             }
             vec![]
         }
+        // Upstream Anthropic -> Responses
+        (ApiType::Anthropic, ApiType::Responses) => {
+            if let Ok(mut chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
+                // Ensure model is patched for message_start
+                if let AnthropicStreamChunk::MessageStart { message } = chunk.clone() {
+                    let mut patched = message.clone();
+                    patched.model = model.clone();
+                    chunk = AnthropicStreamChunk::MessageStart { message: patched };
+                }
+                let resp_chunk: ResponsesStreamChunk = chunk.into();
+                if let Ok(s) = serde_json::to_string(&resp_chunk) {
+                    return vec![(Some(resp_chunk.event_type.clone()), s)];
+                }
+            }
+            vec![]
+        }
+        // Upstream OpenAI -> Responses (via Anthropic pivot)
+        (ApiType::OpenAI, ApiType::Responses) => {
+            if let Ok(mut oai_chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                oai_chunk.model = model.clone();
+                let events = openai_to_anthropic_stream_chunks(
+                    &oai_chunk,
+                    model,
+                    previous_event,
+                    previous_delta_type,
+                    msg_index,
+                );
+                let mut out = Vec::new();
+                for (_event, payload) in events.into_iter() {
+                    if let Ok(anth_chunk) = serde_json::from_str::<AnthropicStreamChunk>(&payload) {
+                        let resp_chunk: ResponsesStreamChunk = anth_chunk.into();
+                        if let Ok(s) = serde_json::to_string(&resp_chunk) {
+                            out.push((Some(resp_chunk.event_type.clone()), s));
+                        }
+                    }
+                }
+                return out;
+            }
+            vec![]
+        }
+        // Upstream Gemini -> Responses (Gemini -> OpenAI -> Anthropic -> Responses)
+        (ApiType::Gemini, ApiType::Responses) => {
+            if let Ok(mut g_chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
+                g_chunk.model_version = Some(model.clone());
+                let oai_chunk: OpenAIStreamChunk = g_chunk.into();
+                let events = openai_to_anthropic_stream_chunks(
+                    &oai_chunk,
+                    model,
+                    previous_event,
+                    previous_delta_type,
+                    msg_index,
+                );
+                let mut out = Vec::new();
+                for (_event, payload) in events.into_iter() {
+                    if let Ok(anth_chunk) = serde_json::from_str::<AnthropicStreamChunk>(&payload) {
+                        let resp_chunk: ResponsesStreamChunk = anth_chunk.into();
+                        if let Ok(s) = serde_json::to_string(&resp_chunk) {
+                            out.push((Some(resp_chunk.event_type.clone()), s));
+                        }
+                    }
+                }
+                return out;
+            }
+            vec![]
+        }
+        // Upstream Responses -> Anthropic
+        (ApiType::Responses, ApiType::Anthropic) => {
+            if let Ok(chunk) = serde_json::from_str::<ResponsesStreamChunk>(data) {
+                let mut anth_chunk: AnthropicStreamChunk = chunk.into();
+                if let AnthropicStreamChunk::MessageStart { message } = anth_chunk.clone() {
+                    let mut patched = message.clone();
+                    patched.model = model.clone();
+                    anth_chunk = AnthropicStreamChunk::MessageStart { message: patched };
+                }
+                if let Ok(s) = serde_json::to_string(&anth_chunk) {
+                    return vec![(Some(anth_chunk.stream_type().to_string()), s)];
+                }
+            }
+            vec![]
+        }
+        // Upstream Responses -> OpenAI
+        (ApiType::Responses, ApiType::OpenAI) => {
+            if let Ok(chunk) = serde_json::from_str::<ResponsesStreamChunk>(data) {
+                let anth_chunk: AnthropicStreamChunk = chunk.into();
+                let mut oai_chunk: OpenAIStreamChunk = anth_chunk.into();
+                oai_chunk.model = model.clone();
+                if let Ok(s) = serde_json::to_string(&oai_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        // Upstream Responses -> Gemini
+        (ApiType::Responses, ApiType::Gemini) => {
+            if let Ok(chunk) = serde_json::from_str::<ResponsesStreamChunk>(data) {
+                let anth_chunk: AnthropicStreamChunk = chunk.into();
+                let mut oai_chunk: OpenAIStreamChunk = anth_chunk.into();
+                oai_chunk.model = model.clone();
+                let mut g_chunk: GeminiStreamChunk = oai_chunk.into();
+                g_chunk.model_version = Some(model.clone());
+                if let Ok(s) = serde_json::to_string(&g_chunk) {
+                    return vec![(None, s)];
+                }
+            }
+            vec![]
+        }
+        // Upstream Responses -> Responses (pass-through, patch model if present)
+        (ApiType::Responses, ApiType::Responses) => {
+            if let Ok(mut chunk) = serde_json::from_str::<ResponsesStreamChunk>(data) {
+                if let ResponsesStreamChunk { payload, .. } = &mut chunk {
+                    if let crate::converters::responses::ResponsesStreamEventPayload::Response {
+                        response,
+                    } = payload
+                    {
+                        response.model = model.clone();
+                    }
+                }
+                if let Ok(s) = serde_json::to_string(&chunk) {
+                    return vec![(Some(chunk.event_type.clone()), s)];
+                }
+            }
+            vec![]
+        }
     }
 }
 
@@ -822,13 +1093,12 @@ pub fn openai_to_anthropic_stream_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use regex::Regex;
-    use mockito;
-    use http_body_util::BodyExt;
     use bytes::Bytes;
     use futures::stream;
-    use serde_json::{json, Value};
-
+    use http_body_util::BodyExt;
+    use mockito;
+    use regex::Regex;
+    use serde_json::{Value, json};
 
     #[tokio::test]
     async fn test_openai_to_openai_response() {
@@ -870,23 +1140,28 @@ mod tests {
         });
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
-        let _m = server.mock("POST", "/test")
+        let _m = server
+            .mock("POST", "/test")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response_json.to_string())
             .create();
 
         let client = reqwest::Client::new();
-        let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
-
+        let response = client
+            .post(format!("{}/test", url))
+            .send()
+            .await
+            .expect("request failed");
 
         let axum_resp = handle_non_streaming_response(
             response,
             "test".to_string(),
             ApiType::OpenAI,
             ApiType::OpenAI,
-        ).await;
-        
+        )
+        .await;
+
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         let json_body: Value = serde_json::from_str(&body_str).unwrap();
@@ -894,12 +1169,23 @@ mod tests {
         assert_eq!(json_body["model"], "test");
         assert_eq!(json_body["usage"]["completion_tokens"], 89);
         assert_eq!(json_body["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(json_body["choices"][0]["message"]["content"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["choices"][0]["message"]["reasoning_content"], "use function");
-        assert_eq!(json_body["choices"][0]["message"]["tool_calls"][0]["id"], "call_-8344960410209973379");
-        assert_eq!(json_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"a\": 365, \"b\": 96}");
+        assert_eq!(
+            json_body["choices"][0]["message"]["content"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["reasoning_content"],
+            "use function"
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_-8344960410209973379"
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"a\": 365, \"b\": 96}"
+        );
     }
-
 
     #[tokio::test]
     async fn test_openai_to_anthropic_response() {
@@ -941,23 +1227,28 @@ mod tests {
         });
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
-        let _m = server.mock("POST", "/test")
+        let _m = server
+            .mock("POST", "/test")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response_json.to_string())
             .create();
 
         let client = reqwest::Client::new();
-        let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
-
+        let response = client
+            .post(format!("{}/test", url))
+            .send()
+            .await
+            .expect("request failed");
 
         let axum_resp = handle_non_streaming_response(
             response,
             "test".to_string(),
             ApiType::OpenAI,
             ApiType::Anthropic,
-        ).await;
-        
+        )
+        .await;
+
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         let json_body: Value = serde_json::from_str(&body_str).unwrap();
@@ -966,7 +1257,10 @@ mod tests {
         assert_eq!(json_body["usage"]["input_tokens"], 170);
         assert_eq!(json_body["stop_reason"], "tool_use");
         assert_eq!(json_body["content"][0]["thinking"], "use function");
-        assert_eq!(json_body["content"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
+        assert_eq!(
+            json_body["content"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
         assert_eq!(json_body["content"][2]["name"], "add");
         assert_eq!(json_body["content"][2]["input"]["a"], 365);
     }
@@ -1007,23 +1301,28 @@ mod tests {
         });
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
-        let _m = server.mock("POST", "/test")
+        let _m = server
+            .mock("POST", "/test")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response_json.to_string())
             .create();
 
         let client = reqwest::Client::new();
-        let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
-
+        let response = client
+            .post(format!("{}/test", url))
+            .send()
+            .await
+            .expect("request failed");
 
         let axum_resp = handle_non_streaming_response(
             response,
             "test".to_string(),
             ApiType::Anthropic,
             ApiType::Anthropic,
-        ).await;
-        
+        )
+        .await;
+
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         let json_body: Value = serde_json::from_str(&body_str).unwrap();
@@ -1031,8 +1330,14 @@ mod tests {
         assert_eq!(json_body["model"], "test");
         assert_eq!(json_body["usage"]["input_tokens"], 170);
         assert_eq!(json_body["stop_reason"], "tool_use");
-        assert_eq!(json_body["content"][0]["thinking"], "Let me analyze this step by step...");
-        assert_eq!(json_body["content"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
+        assert_eq!(
+            json_body["content"][0]["thinking"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["content"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
         assert_eq!(json_body["content"][2]["name"], "add");
         assert_eq!(json_body["content"][2]["input"]["a"], 365);
     }
@@ -1073,23 +1378,28 @@ mod tests {
         });
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
-        let _m = server.mock("POST", "/test")
+        let _m = server
+            .mock("POST", "/test")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(response_json.to_string())
             .create();
 
         let client = reqwest::Client::new();
-        let response = client.post(format!("{}/test", url)).send().await.expect("request failed");
-
+        let response = client
+            .post(format!("{}/test", url))
+            .send()
+            .await
+            .expect("request failed");
 
         let axum_resp = handle_non_streaming_response(
             response,
             "test".to_string(),
             ApiType::Anthropic,
             ApiType::OpenAI,
-        ).await;
-        
+        )
+        .await;
+
         let body_bytes = axum_resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         let json_body: Value = serde_json::from_str(&body_str).unwrap();
@@ -1097,9 +1407,18 @@ mod tests {
         assert_eq!(json_body["model"], "test");
         assert_eq!(json_body["usage"]["completion_tokens"], 113);
         assert_eq!(json_body["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(json_body["choices"][0]["message"]["content"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["choices"][0]["message"]["reasoning_content"], "Let me analyze this step by step...");
-        assert_eq!(json_body["choices"][0]["message"]["tool_calls"][0]["id"], "call_-8344921446265725102");
+        assert_eq!(
+            json_body["choices"][0]["message"]["content"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["reasoning_content"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_-8344921446265725102"
+        );
         let re = Regex::new(r#"\{\s*"a"\s*:\s*365\s*,\s*"b"\s*:\s*96\s*\}"#).unwrap();
         let args = json_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
@@ -1170,10 +1489,22 @@ mod tests {
 
         assert_eq!(json_body["modelVersion"], "test");
         assert_eq!(json_body["usageMetadata"]["candidatesTokenCount"], 113);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][0]["thought"], true);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"], "add");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"], 365);
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["thought"],
+            true
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"],
+            "add"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"],
+            365
+        );
     }
 
     #[tokio::test]
@@ -1233,9 +1564,18 @@ mod tests {
         assert_eq!(json_body["model"], "test");
         assert_eq!(json_body["usage"]["completion_tokens"], 113);
         assert_eq!(json_body["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(json_body["choices"][0]["message"]["content"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["choices"][0]["message"]["reasoning_content"], "Let me analyze this step by step...");
-        assert_eq!(json_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "add");
+        assert_eq!(
+            json_body["choices"][0]["message"]["content"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["reasoning_content"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "add"
+        );
         let re = Regex::new(r#"\{\s*"a"\s*:\s*365\s*,\s*"b"\s*:\s*96\s*\}"#).unwrap();
         let args = json_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
@@ -1300,8 +1640,14 @@ mod tests {
         assert_eq!(json_body["model"], "test");
         assert_eq!(json_body["usage"]["output_tokens"], 113);
         assert_eq!(json_body["stop_reason"], "tool_use");
-        assert_eq!(json_body["content"][0]["thinking"], "Let me analyze this step by step...");
-        assert_eq!(json_body["content"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
+        assert_eq!(
+            json_body["content"][0]["thinking"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["content"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
         assert_eq!(json_body["content"][2]["name"], "add");
         assert_eq!(json_body["content"][2]["input"]["a"], 365);
     }
@@ -1371,11 +1717,26 @@ mod tests {
 
         assert_eq!(json_body["modelVersion"], "test");
         assert_eq!(json_body["usageMetadata"]["candidatesTokenCount"], 113);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][0]["text"], "Let me analyze this step by step...");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][0]["thought"], true);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"], "add");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"], 365);
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["text"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["thought"],
+            true
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"],
+            "add"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"],
+            365
+        );
     }
 
     #[tokio::test]
@@ -1443,11 +1804,26 @@ mod tests {
 
         assert_eq!(json_body["modelVersion"], "test");
         assert_eq!(json_body["usageMetadata"]["candidatesTokenCount"], 113);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][0]["text"], "Let me analyze this step by step...");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][0]["thought"], true);
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][1]["text"], "\nI'll calculate 365 + 96 for you.\n");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"], "add");
-        assert_eq!(json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"], 365);
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["text"],
+            "Let me analyze this step by step..."
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["thought"],
+            true
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][1]["text"],
+            "\nI'll calculate 365 + 96 for you.\n"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"],
+            "add"
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][2]["functionCall"]["args"]["a"],
+            365
+        );
     }
 
     // =============== Streaming tests ===============
@@ -1458,7 +1834,9 @@ mod tests {
         for section in s.split("\n\n") {
             for line in section.lines() {
                 if let Some(rest) = line.strip_prefix("data: ") {
-                    if rest.trim() == "[DONE]" { continue; }
+                    if rest.trim() == "[DONE]" {
+                        continue;
+                    }
                     out.push(rest.to_string());
                 }
             }
@@ -1472,11 +1850,17 @@ mod tests {
             let mut has_event = false;
             let mut data_line: Option<&str> = None;
             for line in section.lines() {
-                if line.trim() == format!("event: {}", event_name) { has_event = true; }
-                if let Some(rest) = line.strip_prefix("data: ") { data_line = Some(rest); }
+                if line.trim() == format!("event: {}", event_name) {
+                    has_event = true;
+                }
+                if let Some(rest) = line.strip_prefix("data: ") {
+                    data_line = Some(rest);
+                }
             }
             if has_event {
-                if let Some(d) = data_line { return Some(d.to_string()); }
+                if let Some(d) = data_line {
+                    return Some(d.to_string());
+                }
             }
         }
         None
@@ -1506,16 +1890,16 @@ mod tests {
             "choices": [ { "index": 0, "delta": { "content": "Hello" }, "finish_reason": null } ]
         });
         let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_chunk).unwrap()))),
+            Ok(Bytes::from(format!(
+                "data: {}\n",
+                serde_json::to_string(&openai_chunk).unwrap()
+            ))),
             Ok(Bytes::from("data: [DONE]\n")),
         ]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::OpenAI,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::OpenAI)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1543,16 +1927,18 @@ mod tests {
                 "model": "claude-3-opus"
             }
         });
-        let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&anthropic_chunk).unwrap()))),
-        ]);
+        let s = stream::iter(vec![Ok(Bytes::from(format!(
+            "data: {}\n",
+            serde_json::to_string(&anthropic_chunk).unwrap()
+        )))]);
 
         let resp = handle_streaming_response(
             s,
             "test".to_string(),
             ApiType::Anthropic,
             ApiType::Anthropic,
-        ).await;
+        )
+        .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1571,16 +1957,14 @@ mod tests {
             "index": 0,
             "delta": { "type": "text_delta", "text": "Hi" }
         });
-        let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&anthropic_chunk).unwrap()))),
-        ]);
+        let s = stream::iter(vec![Ok(Bytes::from(format!(
+            "data: {}\n",
+            serde_json::to_string(&anthropic_chunk).unwrap()
+        )))]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::Anthropic,
-            ApiType::OpenAI,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::Anthropic, ApiType::OpenAI)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1601,31 +1985,32 @@ mod tests {
             "model": "gpt-4",
             "choices": [ { "index": 0, "delta": { "content": "Hello" }, "finish_reason": null } ]
         });
-        let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_chunk).unwrap()))),
-        ]);
+        let s = stream::iter(vec![Ok(Bytes::from(format!(
+            "data: {}\n",
+            serde_json::to_string(&openai_chunk).unwrap()
+        )))]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::Anthropic,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::Anthropic)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
         // Expect message_start
-        let msg_start = find_event_data(&body_str, "message_start").expect("message_start not found");
+        let msg_start =
+            find_event_data(&body_str, "message_start").expect("message_start not found");
         let v_start: Value = serde_json::from_str(&msg_start).unwrap();
         assert_eq!(v_start["message"]["model"], "test");
 
         // Expect content_block_start with text
-        let cb_start = find_event_data(&body_str, "content_block_start").expect("content_block_start not found");
+        let cb_start = find_event_data(&body_str, "content_block_start")
+            .expect("content_block_start not found");
         let v_cb_start: Value = serde_json::from_str(&cb_start).unwrap();
         assert_eq!(v_cb_start["content_block"]["type"], "text");
 
         // Expect content_block_delta with text_delta:"Hello"
-        let cb_delta = find_event_data(&body_str, "content_block_delta").expect("content_block_delta not found");
+        let cb_delta = find_event_data(&body_str, "content_block_delta")
+            .expect("content_block_delta not found");
         let v_cb_delta: Value = serde_json::from_str(&cb_delta).unwrap();
         assert_eq!(v_cb_delta["delta"]["type"], "text_delta");
         assert_eq!(v_cb_delta["delta"]["text"], "Hello");
@@ -1656,17 +2041,23 @@ mod tests {
             "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ]
         });
         let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_reasoning).unwrap()))),
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_text).unwrap()))),
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_finish).unwrap()))),
+            Ok(Bytes::from(format!(
+                "data: {}\n",
+                serde_json::to_string(&openai_reasoning).unwrap()
+            ))),
+            Ok(Bytes::from(format!(
+                "data: {}\n",
+                serde_json::to_string(&openai_text).unwrap()
+            ))),
+            Ok(Bytes::from(format!(
+                "data: {}\n",
+                serde_json::to_string(&openai_finish).unwrap()
+            ))),
         ]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::Anthropic,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::Anthropic)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1682,7 +2073,10 @@ mod tests {
             "content_block_start".to_string(),
             "content_block_delta".to_string(),
         ]));
-        assert!(seq.ends_with(&vec!["message_delta".to_string(), "message_stop".to_string()]));
+        assert!(seq.ends_with(&vec![
+            "message_delta".to_string(),
+            "message_stop".to_string()
+        ]));
 
         // Check payloads for the two deltas
         let first_delta = find_event_data(&body_str, "content_block_delta").unwrap();
@@ -1693,7 +2087,10 @@ mod tests {
         // Find the second content_block_delta by scanning all sections
         let mut text_delta_found = false;
         for section in body_str.split("\n\n") {
-            if section.lines().any(|l| l.trim() == "event: content_block_delta") {
+            if section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_delta")
+            {
                 if let Some(d) = section.lines().find_map(|l| l.strip_prefix("data: ")) {
                     let vv: Value = serde_json::from_str(d).unwrap();
                     if vv["delta"]["type"] == "text_delta" {
@@ -1723,26 +2120,26 @@ mod tests {
                 "finish_reason": null
             } ]
         });
-        let s = stream::iter(vec![
-            Ok(Bytes::from(format!("data: {}\n", serde_json::to_string(&openai_tool).unwrap()))),
-        ]);
+        let s = stream::iter(vec![Ok(Bytes::from(format!(
+            "data: {}\n",
+            serde_json::to_string(&openai_tool).unwrap()
+        )))]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::Anthropic,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::Anthropic)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
-        let cb_start = find_event_data(&body_str, "content_block_start").expect("content_block_start not found");
+        let cb_start = find_event_data(&body_str, "content_block_start")
+            .expect("content_block_start not found");
         let v_start: Value = serde_json::from_str(&cb_start).unwrap();
         assert_eq!(v_start["content_block"]["type"], "tool_use");
         assert_eq!(v_start["content_block"]["id"], "call_1");
         assert_eq!(v_start["content_block"]["name"], "add");
 
-        let cb_delta = find_event_data(&body_str, "content_block_delta").expect("content_block_delta not found");
+        let cb_delta = find_event_data(&body_str, "content_block_delta")
+            .expect("content_block_delta not found");
         let v_delta: Value = serde_json::from_str(&cb_delta).unwrap();
         assert_eq!(v_delta["delta"]["type"], "input_json_delta");
         assert_eq!(v_delta["delta"]["partial_json"], "{\"a\":1}");
@@ -1756,12 +2153,9 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n")),
         ]);
 
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::OpenAI,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::OpenAI)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -1821,32 +2215,36 @@ data: [DONE]
         }
 
         let s = stream::iter(frames);
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::OpenAI,
-            ApiType::Anthropic,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::OpenAI, ApiType::Anthropic)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
         // 1) Starts with message_start and model overridden
-        let msg_start = find_event_data(&body_str, "message_start").expect("message_start not found");
+        let msg_start =
+            find_event_data(&body_str, "message_start").expect("message_start not found");
         let v_start: Value = serde_json::from_str(&msg_start).unwrap();
         assert_eq!(v_start["message"]["model"], "test");
 
         // 2) First content block is thinking with multiple deltas equal to reasoning_pieces.len()
-        let cb_start1 = find_event_data(&body_str, "content_block_start").expect("first content_block_start not found");
+        let cb_start1 = find_event_data(&body_str, "content_block_start")
+            .expect("first content_block_start not found");
         let v_cb_start1: Value = serde_json::from_str(&cb_start1).unwrap();
         assert_eq!(v_cb_start1["content_block"]["type"], "thinking");
 
         // Count thinking deltas
         let mut _thinking_count = 0usize;
         for section in body_str.split("\n\n") {
-            if section.lines().any(|l| l.trim() == "event: content_block_delta") {
+            if section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_delta")
+            {
                 if let Some(d) = section.lines().find_map(|l| l.strip_prefix("data: ")) {
                     let v: Value = serde_json::from_str(d).unwrap_or(json!({}));
-                    if v["delta"]["type"] == "thinking_delta" { _thinking_count += 1; }
+                    if v["delta"]["type"] == "thinking_delta" {
+                        _thinking_count += 1;
+                    }
                 }
             }
         }
@@ -1857,14 +2255,28 @@ data: [DONE]
         let mut saw_text_start = false;
         let mut saw_text_delta = false;
         for section in body_str.split("\n\n") {
-            let is_start = section.lines().any(|l| l.trim() == "event: content_block_start");
+            let is_start = section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_start");
             let data_line = section.lines().find_map(|l| l.strip_prefix("data: "));
             if is_start {
-                if let Some(d) = data_line { let v: Value = serde_json::from_str(d).unwrap(); if v["content_block"]["type"] == "text" { saw_text_start = true; } }
+                if let Some(d) = data_line {
+                    let v: Value = serde_json::from_str(d).unwrap();
+                    if v["content_block"]["type"] == "text" {
+                        saw_text_start = true;
+                    }
+                }
             }
-            let is_delta = section.lines().any(|l| l.trim() == "event: content_block_delta");
+            let is_delta = section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_delta");
             if is_delta {
-                if let Some(d) = data_line { let v: Value = serde_json::from_str(d).unwrap(); if v["delta"]["type"] == "text_delta" && v["delta"]["text"] == "\n" { saw_text_delta = true; } }
+                if let Some(d) = data_line {
+                    let v: Value = serde_json::from_str(d).unwrap();
+                    if v["delta"]["type"] == "text_delta" && v["delta"]["text"] == "\n" {
+                        saw_text_delta = true;
+                    }
+                }
             }
         }
         assert!(saw_text_start);
@@ -1874,7 +2286,10 @@ data: [DONE]
         let mut saw_tool_start = false;
         let mut saw_tool_delta = false;
         for section in body_str.split("\n\n") {
-            if section.lines().any(|l| l.trim() == "event: content_block_start") {
+            if section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_start")
+            {
                 if let Some(d) = section.lines().find_map(|l| l.strip_prefix("data: ")) {
                     let v: Value = serde_json::from_str(d).unwrap();
                     if v["content_block"]["type"] == "tool_use" {
@@ -1884,7 +2299,10 @@ data: [DONE]
                     }
                 }
             }
-            if section.lines().any(|l| l.trim() == "event: content_block_delta") {
+            if section
+                .lines()
+                .any(|l| l.trim() == "event: content_block_delta")
+            {
                 if let Some(d) = section.lines().find_map(|l| l.strip_prefix("data: ")) {
                     let v: Value = serde_json::from_str(d).unwrap();
                     if v["delta"]["type"] == "input_json_delta" {
@@ -1898,7 +2316,8 @@ data: [DONE]
         assert!(saw_tool_delta);
 
         // 5) Finish: message_delta with stop_reason mapped to tool_use and usage mapped
-        let msg_delta = find_event_data(&body_str, "message_delta").expect("message_delta not found");
+        let msg_delta =
+            find_event_data(&body_str, "message_delta").expect("message_delta not found");
         let v_msg_delta: Value = serde_json::from_str(&msg_delta).unwrap();
         assert_eq!(v_msg_delta["delta"]["stop_reason"], "tool_use");
         assert_eq!(v_msg_delta["usage"]["input_tokens"], 170);
@@ -1906,7 +2325,10 @@ data: [DONE]
 
         // 6) Ends with message_stop
         let seq = extract_event_sequence(&body_str);
-        assert!(seq.ends_with(&vec!["message_delta".to_string(), "message_stop".to_string()]));
+        assert!(seq.ends_with(&vec![
+            "message_delta".to_string(),
+            "message_stop".to_string()
+        ]));
     }
 
     #[tokio::test]
@@ -1995,12 +2417,9 @@ data: {"type":"message_stop"}
         }
 
         let s = stream::iter(frames);
-        let resp = handle_streaming_response(
-            s,
-            "test".to_string(),
-            ApiType::Anthropic,
-            ApiType::OpenAI,
-        ).await;
+        let resp =
+            handle_streaming_response(s, "test".to_string(), ApiType::Anthropic, ApiType::OpenAI)
+                .await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
@@ -2016,9 +2435,14 @@ data: {"type":"message_stop"}
         let mut text_out = String::new();
         for f in &frames {
             let v: Value = serde_json::from_str(f).unwrap_or(json!({}));
-            if let Some(s) = v["choices"][0]["delta"]["content"].as_str() { text_out.push_str(s); }
+            if let Some(s) = v["choices"][0]["delta"]["content"].as_str() {
+                text_out.push_str(s);
+            }
         }
-        assert_eq!(text_out, "\nI'll help you calculate 365 + 96 using the addition function.");
+        assert_eq!(
+            text_out,
+            "\nI'll help you calculate 365 + 96 using the addition function."
+        );
 
         // 3) Tool call start maps to OpenAI tool_calls with id/name and empty args initially
         let mut saw_tool_start = false;
@@ -2027,22 +2451,27 @@ data: {"type":"message_stop"}
         for f in &frames {
             let v: Value = serde_json::from_str(f).unwrap_or(json!({}));
             if v["choices"][0]["delta"]["tool_calls"].is_array() {
-                let name = v["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str().unwrap_or("");
+                let name = v["choices"][0]["delta"]["tool_calls"][0]["function"]["name"]
+                    .as_str()
+                    .unwrap_or("");
                 if name == "add" {
                     saw_tool_start = true;
                 }
-                let args = v["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap_or("");
+                let args = v["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap_or("");
                 if args.contains("\"a\": 365") && args.contains("\"b\": 96") {
                     saw_tool_delta = true;
                 }
             }
-            if v["choices"][0]["finish_reason"].as_str() == Some("tool_calls") { saw_finish_tool_calls = true; }
+            if v["choices"][0]["finish_reason"].as_str() == Some("tool_calls") {
+                saw_finish_tool_calls = true;
+            }
         }
         assert!(saw_tool_start);
         assert!(saw_tool_delta);
         assert!(saw_finish_tool_calls);
     }
-
 
     #[test]
     fn test_openai_to_anthropic_stream_chunks_message_start() {
